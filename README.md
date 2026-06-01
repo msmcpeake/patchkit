@@ -4,6 +4,7 @@ A lightweight home server patch manager. SSH into your Linux hosts, check for pe
 
 ![PatchKit Dashboard](docs/screenshot.png)
 ![PatchKit Groups](docs/screenshot2.png)
+![PatchKit Operation](docs/screenshot3.png)
 
 ## Features
 
