@@ -7,8 +7,10 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import smtplib
 import sqlite3
+import threading
 import urllib.request
 import time
 from contextlib import asynccontextmanager
@@ -27,10 +29,24 @@ from pydantic import BaseModel
 
 DB_PATH = Path("patchkit.db")
 LOCK_DIR = Path("/tmp")
+KNOWN_HOSTS = Path("patchkit_known_hosts")
+_KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 CHANGELOG = [
+    {
+        "version": "1.5.1",
+        "date": "2026-06-01",
+        "changes": [
+            "Security: excluded_pkgs values are now shell-quoted (shlex.quote) before use in SSH commands",
+            "Security: SSH connections use TOFU known-hosts verification (patchkit_known_hosts) instead of blindly accepting any host key",
+            "Security: patch lock file acquisition is now atomic (O_CREAT|O_EXCL) to eliminate TOCTOU race",
+            "Security: SMTP notifications attempt STARTTLS before sending",
+            "Security: host update endpoint guards against unexpected column names via explicit allowlist",
+            "History API: limit parameter capped at 500",
+        ],
+    },
     {
         "version": "1.5.0",
         "date": "2026-06-01",
@@ -314,6 +330,21 @@ def _load_key(key_path: Path) -> paramiko.PKey:
     raise RuntimeError(f"Could not load SSH key {key_path}: {last_exc}")
 
 
+def _make_ssh_client() -> paramiko.SSHClient:
+    """Create an SSHClient with TOFU known-hosts verification."""
+    client = paramiko.SSHClient()
+    with _KNOWN_HOSTS_LOCK:
+        if KNOWN_HOSTS.exists():
+            client.load_host_keys(str(KNOWN_HOSTS))
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    return client
+
+
+def _save_host_key(client: paramiko.SSHClient):
+    with _KNOWN_HOSTS_LOCK:
+        client.save_host_keys(str(KNOWN_HOSTS))
+
+
 def ssh_connect(host: sqlite3.Row) -> paramiko.SSHClient:
     db = get_db()
     defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
@@ -323,13 +354,13 @@ def ssh_connect(host: sqlite3.Row) -> paramiko.SSHClient:
     port     = int(host["port"] or defaults.get("ssh_port", 22))
     timeout  = int(defaults.get("ssh_timeout", 10))
     pkey = _load_key(key_path)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = _make_ssh_client()
     client.connect(
         hostname=host["ip"], port=port, username=user, pkey=pkey,
         timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
         look_for_keys=False, allow_agent=False,
     )
+    _save_host_key(client)
     return client
 
 
@@ -587,6 +618,10 @@ def _send_notification_sync(subject: str, body: str):
     msg["From"]    = "patchkit@localhost"
     msg["To"]      = to_email
     with smtplib.SMTP(smtp_host, port, timeout=15) as smtp:
+        try:
+            smtp.starttls()
+        except smtplib.SMTPException:
+            pass  # relay doesn't support STARTTLS; proceed plain
         smtp.sendmail("patchkit@localhost", [to_email], msg.as_string())
 
 
@@ -656,15 +691,30 @@ def _lock_path(host_id: int) -> Path:
 
 def _acquire_lock(host_id: int) -> bool:
     p = _lock_path(host_id)
-    if p.exists():
+    content = f"{os.getpid()} {datetime.now().isoformat()}".encode()
+
+    def _try_create() -> bool:
         try:
-            pid = int(p.read_text().split()[0])
-            os.kill(pid, 0)   # raises if process is gone
-            return False       # process alive → locked
-        except (ValueError, IndexError, ProcessLookupError, PermissionError):
-            pass              # stale lock
-    p.write_text(f"{os.getpid()} {datetime.now().isoformat()}")
-    return True
+            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, content)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
+    if _try_create():
+        return True
+
+    # Lock file exists — check if owning process is still alive
+    try:
+        pid = int(p.read_text().split()[0])
+        os.kill(pid, 0)   # raises if process is gone
+        return False       # process alive → locked
+    except (ValueError, IndexError, ProcessLookupError, PermissionError):
+        pass              # stale lock
+
+    p.unlink(missing_ok=True)
+    return _try_create()  # another process may win here; that's fine
 
 
 def _release_lock(host_id: int):
@@ -843,7 +893,7 @@ async def patch_host_stream(host_id: int):
             if excluded:
                 yield emit(f"Holding excluded packages: {', '.join(excluded)}")
                 await loop.run_in_executor(
-                    None, lambda: ssh_run(client, f"apt-mark hold {' '.join(excluded)} 2>&1", timeout=30)
+                    None, lambda: ssh_run(client, f"apt-mark hold {' '.join(shlex.quote(p) for p in excluded)} 2>&1", timeout=30)
                 )
             rc, _, err = await loop.run_in_executor(
                 None, lambda: ssh_run(client, "DEBIAN_FRONTEND=noninteractive apt-get update -q 2>&1", 60)
@@ -889,7 +939,7 @@ async def patch_host_stream(host_id: int):
                 if "nobara" in (os_detected or "").lower():
                     upgrade_cmd = "nobara-sync cli 2>&1"
                 else:
-                    excl_flags = " ".join(f"--exclude={p}" for p in excluded) if excluded else ""
+                    excl_flags = " ".join(f"--exclude={shlex.quote(p)}" for p in excluded) if excluded else ""
                     upgrade_cmd = f"dnf upgrade -y {excl_flags} 2>&1".strip()
                 autoremove_cmd = "dnf autoremove -y 2>&1"
                 clean_cmd      = "dnf clean all 2>&1"
@@ -925,7 +975,7 @@ async def patch_host_stream(host_id: int):
         # ── Post-upgrade cleanup ──────────────────────────────────────────
         if pkg_mgr == 'apt' and excluded:
             await loop.run_in_executor(
-                None, lambda: ssh_run(client, f"apt-mark unhold {' '.join(excluded)} 2>&1", timeout=30)
+                None, lambda: ssh_run(client, f"apt-mark unhold {' '.join(shlex.quote(p) for p in excluded)} 2>&1", timeout=30)
             )
             yield emit(f"Released holds on: {', '.join(excluded)}")
 
@@ -1238,10 +1288,13 @@ def add_host(body: HostCreate):
     return {"id": hid, "name": body.name}
 
 
+_ALLOWED_HOST_COLUMNS = {"name", "ip", "port", "ssh_user", "ssh_key", "os_name", "role", "tags", "excluded_pkgs", "enabled"}
+
+
 @app.patch("/api/hosts/{host_id}")
 def update_host(host_id: int, body: HostUpdate):
     db = get_db()
-    fields = {k: v for k, v in body.dict().items() if v is not None}
+    fields = {k: v for k, v in body.dict().items() if v is not None and k in _ALLOWED_HOST_COLUMNS}
     if not fields:
         db.close()
         return {"ok": True}
@@ -1293,14 +1346,14 @@ def test_host(host_id: int):
         steps["error"] = str(e)
         return steps
     try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client = _make_ssh_client()
         pkey = _load_key(key_path)
         client.connect(
             hostname=row["ip"], port=port, username=user, pkey=pkey,
             timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
             look_for_keys=False, allow_agent=False,
         )
+        _save_host_key(client)
         _, out, _ = client.exec_command("echo ok", timeout=5)
         steps["connect"] = out.read().decode().strip()
         client.close()
@@ -1469,6 +1522,7 @@ async def patch_all():
 
 @app.get("/api/history")
 def get_history(limit: int = 50):
+    limit = min(max(limit, 1), 500)
     db = get_db()
     runs = [dict(r) for r in db.execute(
         "SELECT * FROM patch_runs ORDER BY id DESC LIMIT ?", (limit,)
