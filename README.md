@@ -10,7 +10,7 @@ A lightweight home server patch manager. SSH into your Linux hosts, check for pe
 - **Dashboard** - at-a-glance view of all hosts, pending updates, security flags, and reboot status
 - **Hosts** - add, edit, scan, and patch individual servers over SSH
 - **Groups** - tag-based host groups with bulk scan, patch, and rolling reboot
-- **Updates** - per-host pending package list with security package highlighting
+- **Updates** - per-host pending package list
 - **Schedules** - cron-based automated patching with per-schedule host selection
 - **History** - full patch run logs with per-run output
 - **Notifications** - email (SMTP) and webhook (Telegram, Slack, Discord, ntfy, etc.)
