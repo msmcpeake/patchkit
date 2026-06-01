@@ -1,0 +1,13 @@
+[Unit]
+Description=PatchKit patch manager
+After=network.target
+
+[Service]
+Type=simple
+User=patchkit
+WorkingDirectory=/opt/patchkit
+ExecStart=/opt/patchkit/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
