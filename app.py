@@ -32,9 +32,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = Path("patchkit_known_hosts")
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 CHANGELOG = [
+    {
+        "version": "1.5.2",
+        "date": "2026-06-01",
+        "changes": [
+            "Parallel patching: patch all, patch group, and patch all groups now run all hosts simultaneously instead of sequentially",
+            "Scheduled patches also run all hosts in parallel via asyncio.gather",
+        ],
+    },
     {
         "version": "1.5.1",
         "date": "2026-06-01",
@@ -1076,9 +1084,11 @@ async def _run_scheduled_patch(schedule_id: int, host_ids: list[int]):
     if not host_ids:
         host_ids = [r["id"] for r in db.execute("SELECT id FROM hosts WHERE enabled=1")]
     db.close()
-    for hid in host_ids:
+    async def _drain(hid: int):
         async for _ in patch_host_stream(hid):
             pass
+
+    await asyncio.gather(*[_drain(hid) for hid in host_ids])
     job = scheduler.get_job(f"sched_{schedule_id}")
     if job and job.next_run_time:
         db2 = get_db()

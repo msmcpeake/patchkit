@@ -685,7 +685,7 @@ function patchGroup(tag) {
     .map(h => h.id);
   if (!ids.length) { showToast(`Group "${tag}" is up to date`); return; }
   ids.forEach(id => S.patching.add(id));
-  streamPatch(`/api/hosts/${ids[0]}/patch`, ids[0], ids.slice(1));
+  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
 }
 
 function rollingReboot(tag) {
@@ -745,7 +745,7 @@ function patchAllGroups() {
     .map(h => h.id);
   if (!ids.length) { showToast('All groups are up to date'); return; }
   ids.forEach(id => S.patching.add(id));
-  streamPatch(`/api/hosts/${ids[0]}/patch`, ids[0], ids.slice(1));
+  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
 }
 
 // --- Schedule page ---
@@ -893,7 +893,7 @@ function patchAll() {
   const ids = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0).map(h => h.id);
   if (ids.length === 0) { alert('Nothing to patch — all hosts are up to date.'); return; }
   ids.forEach(id => S.patching.add(id));
-  streamPatch(`/api/hosts/${ids[0]}/patch`, ids[0], ids.slice(1));
+  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
 }
 
 async function rebootHost(id, name) {
