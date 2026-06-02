@@ -133,9 +133,42 @@ tr:hover td{background:var(--bg)}
 .host-tag{display:inline-flex;align-items:center;font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:var(--purple-bg);color:var(--purple);margin-right:3px;margin-top:2px}
 .group-host-row:last-child{border-bottom:none}
 .group-host-row:hover{background:var(--bg)}
+.schedule-header{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 50px 64px;padding:8px 16px;border-bottom:1px solid var(--border)}
+#mobile-header{display:none;position:fixed;top:0;left:0;right:0;height:46px;z-index:200;background:var(--surface);border-bottom:1px solid var(--border);align-items:center;padding:0 12px;gap:10px}
+#mobile-header button{background:none;border:none;cursor:pointer;color:var(--text);font-size:20px;padding:4px;line-height:1;border-radius:var(--radius)}
+#mobile-header button:hover{background:var(--bg)}
+#mobile-header .logo-text{font-size:14px;font-weight:600;display:flex;align-items:center;gap:6px}
+#mobile-header .logo-text i{color:var(--purple);font-size:16px}
+#sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:90}
+@media(max-width:768px){
+  .metrics{grid-template-columns:repeat(2,1fr)}
+  .form-grid{grid-template-columns:1fr}
+}
+@media(max-width:640px){
+  #mobile-header{display:flex}
+  #sidebar-backdrop.open{display:block}
+  .app{grid-template-columns:1fr}
+  .sidebar{position:fixed;left:0;top:0;bottom:0;z-index:100;transform:translateX(-100%);transition:transform .25s ease;width:210px}
+  .sidebar.open{transform:translateX(0);box-shadow:4px 0 24px rgba(0,0,0,.25)}
+  .main{padding:14px;padding-top:60px;max-height:none}
+  .topbar{flex-wrap:wrap;gap:8px}
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .schedule-header{grid-template-columns:1fr auto auto}
+  .schedule-header>*:nth-child(2),.schedule-header>*:nth-child(3),.schedule-header>*:nth-child(4){display:none}
+  .schedule-grid{grid-template-columns:1fr auto auto}
+  .schedule-grid>*:nth-child(2),.schedule-grid>*:nth-child(3),.schedule-grid>*:nth-child(4){display:none}
+  #patch-modal{right:8px!important;left:8px!important;width:auto!important;max-width:none!important}
+  .modal{width:calc(100vw - 32px);padding:16px}
+  .modal-bg{padding:0 16px}
+}
 </style>
 </head>
 <body>
+<div id="mobile-header">
+  <button onclick="toggleMobileSidebar()" aria-label="Menu"><i class="ti ti-menu-2"></i></button>
+  <span class="logo-text"><i class="ti ti-shield-check"></i>PatchKit</span>
+</div>
+<div id="sidebar-backdrop" onclick="closeMobileSidebar()"></div>
 <div class="app">
   <aside class="sidebar">
     <div class="logo"><i class="ti ti-shield-check"></i>PatchKit</div>
@@ -320,7 +353,18 @@ async function api(method, path, body) {
 function nav(page) {
   S.page = page;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === page));
+  closeMobileSidebar();
   render();
+}
+
+function toggleMobileSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.getElementById('sidebar-backdrop').classList.toggle('open');
+}
+
+function closeMobileSidebar() {
+  document.querySelector('.sidebar').classList.remove('open');
+  document.getElementById('sidebar-backdrop').classList.remove('open');
 }
 
 // Modal helpers
@@ -756,7 +800,7 @@ async function schedule() {
   <div class="card">
     <div class="card-header"><h3><i class="ti ti-calendar-event"></i>Patch schedules</h3></div>
     ${scheds.length === 0 ? `<div class="empty"><i class="ti ti-calendar-off"></i><p>No schedules yet.</p></div>` : `
-    <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 50px 64px;padding:8px 16px;border-bottom:1px solid var(--border)">
+    <div class="schedule-header">
       ${['Name','Hosts','Cron','Next run','On',''].map(h=>`<span style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em">${h}</span>`).join('')}
     </div>
     ${scheds.map(s => `

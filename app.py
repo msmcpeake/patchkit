@@ -32,9 +32,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = Path("patchkit_known_hosts")
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 
 CHANGELOG = [
+    {
+        "version": "1.5.3",
+        "date": "2026-06-02",
+        "changes": [
+            "Mobile support: responsive layout with collapsing sidebar drawer, hamburger menu header bar, 2-column metrics on tablet, horizontal-scrolling tables, single-column forms, and full-width patch log cards on small screens",
+        ],
+    },
     {
         "version": "1.5.2",
         "date": "2026-06-01",
