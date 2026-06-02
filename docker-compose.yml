@@ -4,5 +4,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/app/data
+      - patchkit-data:/app/data
     restart: unless-stopped
+
+volumes:
+  patchkit-data:

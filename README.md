@@ -18,6 +18,26 @@ A lightweight home server patch manager. SSH into your Linux hosts, check for pe
 - **Forward auth** - optional reverse proxy authentication (Authentik, Authelia, etc.)
 - **Auto-refresh** - dashboard silently updates every 30 seconds
 
+## Docker
+
+```bash
+docker volume create patchkit-data
+
+docker run -d \
+  --name patchkit \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v patchkit-data:/app/data \
+  ghcr.io/msmcpeake/patchkit:latest
+```
+
+Or with Docker Compose:
+
+```bash
+curl -O https://raw.githubusercontent.com/msmcpeake/patchkit/main/docker-compose.yml
+docker compose up -d
+```
+
 ## Requirements
 
 - Python 3.11+
