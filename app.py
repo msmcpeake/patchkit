@@ -35,9 +35,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = Path("patchkit_known_hosts")
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 CHANGELOG = [
+    {
+        "version": "1.7.1",
+        "date": "2026-06-02",
+        "changes": [
+            "Docker image published to ghcr.io on each release via GitHub Actions",
+        ],
+    },
     {
         "version": "1.7.0",
         "date": "2026-06-02",
