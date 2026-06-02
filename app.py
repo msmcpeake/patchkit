@@ -36,9 +36,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 CHANGELOG = [
+    {
+        "version": "1.7.2",
+        "date": "2026-06-02",
+        "changes": [
+            "Phased apt updates detected on scan and shown with a PHASED X% badge in the updates list",
+        ],
+    },
     {
         "version": "1.7.1",
         "date": "2026-06-02",
