@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.7.8"
 
 CHANGELOG = [
+    {
+        "version": "1.7.8",
+        "date": "2026-06-02",
+        "changes": [
+            "Fix: theme toggle now correctly applies dark/light mode",
+        ],
+    },
     {
         "version": "1.7.7",
         "date": "2026-06-02",
