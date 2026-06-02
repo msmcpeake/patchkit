@@ -2,19 +2,18 @@
 
 A lightweight home server patch manager. SSH into your Linux hosts, check for pending package updates, apply upgrades, and track reboot requirements from a single web UI.
 
-![PatchKit Dashboard](docs/screenshot.png)
-![PatchKit Groups](docs/screenshot2.png)
-![PatchKit Operation](docs/screenshot3.png)
-
 ## Features
 
 - **Dashboard** - at-a-glance view of all hosts, pending updates, security flags, and reboot status
 - **Hosts** - add, edit, scan, and patch individual servers over SSH
+- **Credentials** - store SSH keys and sudo config in the database; assign to hosts by name
 - **Groups** - tag-based host groups with bulk scan, patch, and rolling reboot
-- **Updates** - per-host pending package list
+- **Updates** - per-host pending package list with live search filter
 - **Schedules** - cron-based automated patching with per-schedule host selection
 - **History** - full patch run logs with per-run output
 - **Notifications** - email (SMTP) and webhook (Telegram, Slack, Discord, ntfy, etc.)
+- **Sudo elevation** - connect as a non-root user; PatchKit wraps privileged commands with sudo automatically (NOPASSWD or password)
+- **Mobile** - responsive layout with collapsing sidebar
 - **Supports** apt (Debian, Ubuntu, Raspberry Pi OS) and dnf/rpm (Fedora, Rocky Linux, RHEL, AlmaLinux, CentOS, Nobara)
 - **Forward auth** - optional reverse proxy authentication (Authentik, Authelia, etc.)
 - **Auto-refresh** - dashboard silently updates every 30 seconds
@@ -53,16 +52,27 @@ systemctl enable --now patchkit
 
 Edit `WorkingDirectory` and `ExecStart` in `patchkit.service` if you installed somewhere other than `/opt/patchkit`.
 
-## SSH key setup
+## SSH credentials
 
-PatchKit uses SSH key auth to connect to hosts. It defaults to `~/.ssh/id_ed25519` (relative to the user running the service). Override per-host or globally in **Settings -> SSH defaults**.
+The recommended approach is to use **Credential sets** (Credentials page in the UI). Paste your private key content directly into the database; no file path management needed. Assign a credential to one or many hosts.
+
+If you prefer path-based keys, set the key path per-host or globally in **Settings -> SSH defaults**. Paths are relative to the user running the service (e.g. the `patchkit` system user's home directory).
 
 ```bash
-# Generate a dedicated key (recommended)
-ssh-keygen -t ed25519 -f ~/.ssh/patchkit -C "patchkit"
+# Generate a dedicated key
+ssh-keygen -t ed25519 -f ~/.ssh/patchkit_id -C "patchkit"
 
 # Copy to each host
-ssh-copy-id -i ~/.ssh/patchkit.pub root@192.168.1.x
+ssh-copy-id -i ~/.ssh/patchkit_id.pub user@192.168.1.x
+```
+
+## Sudo elevation
+
+If your hosts do not allow direct root SSH, set the SSH user to a non-root account. PatchKit detects non-root users and automatically wraps privileged commands with `sudo`. Configure the sudo password (or leave blank for NOPASSWD) on the credential set or per-host in the host edit modal, with a global fallback in **Settings -> SSH defaults**.
+
+Typical sudoers line for NOPASSWD:
+```
+youruser ALL=(ALL) NOPASSWD: ALL
 ```
 
 ## Webhook notifications
@@ -77,17 +87,17 @@ URL:      https://api.telegram.org/bot<TOKEN>/sendMessage
 Template: {"chat_id":"<CHAT_ID>","text":"PatchKit: {host} - {result_upper}\n{packages} packages in {duration}s"}
 ```
 
-ntfy, Gotify, Slack, and Discord all work the same way - just provide the webhook URL and a matching template.
+ntfy, Gotify, Slack, and Discord all work the same way.
 
 ## Forward auth
 
-Set a header name in **Settings -> Access control** (e.g. `X-Authentik-Username`). When PatchKit sees this header on an incoming request it trusts the value as the logged-in user identity. Any reverse proxy that performs authentication and injects a trusted header works (Authentik, Authelia, Caddy, nginx auth_request, etc.).
+Set a header name in **Settings -> Access control** (e.g. `X-Authentik-Username`). PatchKit trusts the value of that header as the logged-in user identity. Any reverse proxy that injects a trusted header after authentication works (Authentik, Authelia, Caddy, nginx auth_request, etc.).
 
-Configure your proxy before enabling this setting. If the header is set but your proxy is not configured to inject it, you will be locked out. To recover: stop PatchKit, open `patchkit.db` with any SQLite client, and set `auth_header` to an empty string in the `settings` table.
+Configure your proxy before enabling this setting. To recover from a lockout: stop PatchKit, open `patchkit.db` with any SQLite client, and clear the `auth_header` value in the `settings` table.
 
 ## Rolling reboot
 
-Groups support a rolling reboot that reboots hosts one at a time. After each reboot, PatchKit waits for SSH to go down, waits for it to come back, holds a configurable grace period, then rescans the host to clear the reboot-required flag before moving to the next host. Useful for Kubernetes nodes where you need to maintain cluster quorum.
+Groups support a rolling reboot that reboots hosts one at a time. PatchKit waits for SSH to go down, waits for it to come back, holds a configurable grace period, then rescans to clear the reboot-required flag before moving to the next host. Useful for Kubernetes nodes where you need to maintain cluster quorum.
 
 ## Stack
 
