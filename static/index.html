@@ -22,6 +22,16 @@
   --text:#f0efea;--text2:#9b9b95;--text3:#6b6b66;
   --purple-bg:#26215c;--green-bg:#04342c;--amber-bg:#412402;--red-bg:#501313;--blue-bg:#042c53;
 }}
+html[data-theme="dark"] :root{
+  --bg:#1a1a18;--surface:#242422;--border:#333330;--border2:#444440;
+  --text:#f0efea;--text2:#9b9b95;--text3:#6b6b66;
+  --purple-bg:#26215c;--green-bg:#04342c;--amber-bg:#412402;--red-bg:#501313;--blue-bg:#042c53;
+}
+html[data-theme="light"] :root{
+  --bg:#f8f8f6;--surface:#fff;--border:#e5e4de;--border2:#d0cfc8;
+  --text:#1a1a18;--text2:#6b6b66;--text3:#9b9b95;
+  --purple-bg:#eeedfe;--green-bg:#e1f5ee;--amber-bg:#faeeda;--red-bg:#fcebeb;--blue-bg:#e6f1fb;
+}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;min-height:100vh}
 .app{display:grid;grid-template-columns:210px 1fr;min-height:100vh}
 .sidebar{background:var(--surface);border-right:1px solid var(--border);padding:0;display:flex;flex-direction:column}
@@ -185,8 +195,11 @@ tr:hover td{background:var(--bg)}
     <div class="nav-bottom">
       <div id="user-info"></div>
       <div class="nav-item" data-page="settings" onclick="nav('settings')"><i class="ti ti-settings"></i>Settings</div>
-      <div id="version-badge" onclick="showChangelog()" style="padding:6px 16px 10px;font-size:11px;color:var(--text3);cursor:pointer;display:flex;align-items:center;gap:5px;transition:color .15s" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'">
-        <i class="ti ti-tag" style="font-size:12px"></i><span id="version-label">PatchKit</span>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:2px 8px 2px 16px">
+        <div id="version-badge" onclick="showChangelog()" style="font-size:11px;color:var(--text3);cursor:pointer;display:flex;align-items:center;gap:5px;transition:color .15s;padding:4px 0 8px" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'">
+          <i class="ti ti-tag" style="font-size:12px"></i><span id="version-label">PatchKit</span>
+        </div>
+        <button id="theme-btn" onclick="cycleTheme()" title="Toggle theme" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px 6px 8px;line-height:1" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'"><i class="ti ti-sun-moon"></i></button>
       </div>
     </div>
   </aside>
@@ -363,6 +376,15 @@ tr:hover td{background:var(--bg)}
       <button class="btn" onclick="closeModal('modal-bulk-import')">Close</button>
       <button class="btn btn-primary" onclick="saveBulkImport()"><i class="ti ti-file-import"></i>Import</button>
     </div>
+  </div>
+</div>
+
+<!-- Credential Test Modal -->
+<div class="modal-bg" id="modal-cred-test">
+  <div class="modal" style="width:480px">
+    <h3 id="modal-cred-test-title">Test credential</h3>
+    <div id="modal-cred-test-body" style="padding:8px 0"></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal('modal-cred-test')">Close</button></div>
   </div>
 </div>
 
@@ -720,6 +742,7 @@ async function credentials() {
           <td class="mono" style="font-size:11px;color:var(--text3)">${c.fingerprint || '-'}</td>
           <td><span class="badge badge-gray">${c.host_count} host${c.host_count !== 1 ? 's' : ''}</span></td>
           <td><div class="btn-row">
+            <button class="btn btn-sm btn-icon" onclick="testCredential(${c.id},this)" title="Test SSH connection to assigned hosts"><i class="ti ti-plug-connected"></i></button>
             <button class="btn btn-sm btn-icon" onclick="editCredential(${c.id})" title="Edit"><i class="ti ti-pencil"></i></button>
             <button class="btn btn-sm btn-icon btn-danger" onclick="deleteCredential(${c.id},'${c.name}')" title="Delete"><i class="ti ti-trash"></i></button>
           </div></td>
@@ -838,6 +861,7 @@ async function updates() {
         <h3 style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           <span class="dot dot-warn" style="width:8px;height:8px"></span>&nbsp;${h.name}
           <span class="badge badge-gray" style="font-weight:400;margin-left:4px">${h.ip}</span>
+          <span class="badge badge-gray" style="font-weight:400;margin-left:2px">${h.os_name}</span>
           ${rebootTag(h)}${secLabel}
         </h3>
         <div class="btn-row" style="flex-shrink:0;margin-left:8px">
@@ -853,7 +877,10 @@ async function updates() {
               <span class="pkg-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</span>
               ${p.phased_pct != null ? `<span class="pkg-badge-phased" title="Ubuntu phased update - only ${p.phased_pct}% of machines receive this update so far">PHASED ${p.phased_pct}%</span>` : ''}
             </div>
-            <span class="pkg-ver">${p.from}<span class="arrow">→</span><span class="ver-new">${p.to}</span></span>
+            <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+              <span class="pkg-ver">${p.from}<span class="arrow">→</span><span class="ver-new">${p.to}</span></span>
+              <button onclick="excludePkg(${h.id},'${p.name}',this)" title="Exclude from upgrades" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:0;line-height:1;flex-shrink:0" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text3)'"><i class="ti ti-ban"></i></button>
+            </div>
           </div>`).join('')}
         ${_updatesSecOnly && secPkgs.length < allPkgs.length
           ? `<div style="padding:8px 0;font-size:12px;color:var(--text3);text-align:center">${allPkgs.length - secPkgs.length} non-security update(s) hidden</div>`
@@ -1164,10 +1191,13 @@ function patchOne(id) {
 }
 
 function patchAll() {
-  const ids = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0).map(h => h.id);
-  if (ids.length === 0) { alert('Nothing to patch, all hosts are up to date.'); return; }
-  ids.forEach(id => S.patching.add(id));
-  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
+  const hosts = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0);
+  if (hosts.length === 0) { alert('Nothing to patch, all hosts are up to date.'); return; }
+  const totalPkgs = hosts.reduce((n, h) => n + h.scan.pkg_count, 0);
+  const lines = hosts.map(h => `  ${h.name}  (${h.scan.pkg_count} package${h.scan.pkg_count > 1 ? 's' : ''})`).join('\n');
+  if (!confirm(`Patch ${hosts.length} host${hosts.length > 1 ? 's' : ''} - ${totalPkgs} package${totalPkgs > 1 ? 's' : ''} total?\n\n${lines}`)) return;
+  hosts.forEach(h => S.patching.add(h.id));
+  hosts.forEach(h => streamPatch(`/api/hosts/${h.id}/patch`, h.id));
 }
 
 async function rebootHost(id, name) {
@@ -1539,6 +1569,62 @@ async function saveBulkImport() {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
+async function testCredential(id, btn) {
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader-2" style="animation:spin 1s linear infinite"></i>';
+  try {
+    const res = await api('GET', `/credentials/${id}/test`);
+    const cred = S.credentials.find(c => c.id === id);
+    document.getElementById('modal-cred-test-title').textContent = `Test: ${cred ? cred.name : 'credential'}`;
+    const body = document.getElementById('modal-cred-test-body');
+    if (res.error) {
+      body.innerHTML = `<div style="color:var(--red);padding:8px 0"><i class="ti ti-x"></i> ${res.error}</div>`;
+    } else if (!res.results.length) {
+      body.innerHTML = `<div style="color:var(--text3);padding:8px 0">${res.message || 'No hosts assigned.'}</div>`;
+    } else {
+      body.innerHTML = res.results.map(r => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px">
+          <i class="ti ${r.ok ? 'ti-check' : 'ti-x'}" style="color:var(--${r.ok ? 'green' : 'red'});flex-shrink:0"></i>
+          <div style="min-width:0">
+            <strong>${r.host}</strong> <span style="color:var(--text3);font-size:11px">${r.ip}</span>
+            ${r.error ? `<div style="color:var(--red);font-size:11px;margin-top:2px">${r.error}</div>` : ''}
+          </div>
+        </div>`).join('');
+    }
+    openModal('modal-cred-test');
+  } catch(e) { alert('Test failed: ' + e.message); }
+  finally { btn.innerHTML = orig; btn.disabled = false; }
+}
+
+async function excludePkg(hostId, pkgName, btn) {
+  const h = S.hosts.find(x => x.id === hostId);
+  if (!h) return;
+  const existing = (h.excluded_pkgs || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (existing.includes(pkgName)) { showToast(`${pkgName} is already excluded`); return; }
+  existing.push(pkgName);
+  try {
+    await api('PATCH', `/hosts/${hostId}`, { excluded_pkgs: existing.join(', ') });
+    showToast(`${pkgName} added to excluded packages for ${h.name}`);
+    render();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+const _themes = ['auto','dark','light'];
+function cycleTheme() {
+  const cur = localStorage.getItem('theme') || 'auto';
+  const next = _themes[(_themes.indexOf(cur) + 1) % _themes.length];
+  localStorage.setItem('theme', next);
+  applyTheme(next);
+}
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+  const icons = { auto: 'ti-sun-moon', dark: 'ti-moon', light: 'ti-sun' };
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.innerHTML = `<i class="ti ${icons[t]}"></i>`;
+}
+
 async function toggleSchedule(id, enabled) {
   await api('PATCH', `/schedules/${id}`, { enabled: enabled ? 1 : 0 });
 }
@@ -1656,6 +1742,22 @@ async function loadUser() {
     </div>`;
   } catch(e) {}
 }
+
+// Theme
+applyTheme(localStorage.getItem('theme') || 'auto');
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-bg.open').forEach(m => m.classList.remove('open'));
+  } else if (e.key === 's') {
+    scanAll();
+  } else if (e.key === 'p') {
+    patchAll();
+  }
+});
 
 // Boot
 loadVersion();

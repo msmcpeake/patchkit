@@ -37,9 +37,21 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.6"
+APP_VERSION = "1.7.7"
 
 CHANGELOG = [
+    {
+        "version": "1.7.7",
+        "date": "2026-06-02",
+        "changes": [
+            "Test credential button: verify SSH connectivity to all assigned hosts from the credentials page",
+            "Exclude package: ban button on each package in the updates list adds it to the host's excluded list",
+            "OS badge shown on each host card in the updates page",
+            "Dark/light/auto theme toggle in the sidebar",
+            "Keyboard shortcuts: S to scan all, P to patch all, Escape to close modals",
+            "Patch all now shows a confirmation with host and package counts before firing",
+        ],
+    },
     {
         "version": "1.7.6",
         "date": "2026-06-02",
@@ -1747,6 +1759,47 @@ def delete_credential(cid: int):
     db.commit()
     db.close()
     return {"ok": True}
+
+
+@app.get("/api/credentials/{cid}/test")
+def test_credential(cid: int):
+    db = get_db()
+    cred = db.execute("SELECT * FROM credentials WHERE id=?", (cid,)).fetchone()
+    if not cred:
+        db.close()
+        raise HTTPException(404, "Credential not found")
+    hosts = db.execute("SELECT * FROM hosts WHERE credential_id=? AND enabled=1", (cid,)).fetchall()
+    defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+    db.close()
+
+    if not hosts:
+        return {"results": [], "message": "No hosts assigned to this credential"}
+
+    try:
+        pkey = _load_key_content(cred["ssh_key"])
+    except Exception as e:
+        return {"results": [], "error": f"Failed to load key: {e}"}
+
+    results = []
+    for h in hosts:
+        port    = int(h["port"] or defaults.get("ssh_port", 22))
+        user    = cred["ssh_user"] or defaults.get("ssh_user", "root")
+        timeout = int(defaults.get("ssh_timeout", 10))
+        try:
+            client = _make_ssh_client()
+            client.connect(
+                hostname=h["ip"], port=port, username=user, pkey=pkey,
+                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
+                look_for_keys=False, allow_agent=False,
+            )
+            _, out, _ = client.exec_command("echo ok", timeout=5)
+            ok = out.read().decode().strip() == "ok"
+            client.close()
+            results.append({"host": h["name"], "ip": h["ip"], "ok": ok, "error": None})
+        except Exception as e:
+            results.append({"host": h["name"], "ip": h["ip"], "ok": False, "error": str(e)})
+
+    return {"results": results}
 
 
 @app.get("/api/hosts/{host_id}/test")
