@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import smtplib
+import socket
 import sqlite3
 import threading
 import urllib.request
@@ -36,9 +37,18 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 
 CHANGELOG = [
+    {
+        "version": "1.7.3",
+        "date": "2026-06-02",
+        "changes": [
+            "Bulk import: add multiple hosts at once from a textarea (name ip per line) with shared credential, port, and tags",
+            "Clone host: duplicate a host entry pre-filled in the add modal with a -copy name suffix",
+            "Ping: TCP reachability check with latency shown inline on the host row",
+        ],
+    },
     {
         "version": "1.7.2",
         "date": "2026-06-02",
@@ -385,6 +395,18 @@ class HostUpdate(BaseModel):
     sudo_pass: Optional[str] = None
     credential_id: Optional[int] = None
     enabled: Optional[int] = None
+
+class BulkHostEntry(BaseModel):
+    name: str
+    ip: str
+    port: int = 22
+    credential_id: Optional[int] = None
+    ssh_user: str = "root"
+    ssh_key: str = "~/.ssh/id_ed25519"
+    tags: str = ""
+
+class BulkImport(BaseModel):
+    hosts: list[BulkHostEntry]
 
 class SettingsPayload(BaseModel):
     settings: dict[str, str]
@@ -1551,6 +1573,42 @@ def delete_host(host_id: int):
     db.commit()
     db.close()
     return {"ok": True}
+
+
+@app.post("/api/hosts/bulk", status_code=201)
+def bulk_import_hosts(body: BulkImport):
+    db = get_db()
+    added, skipped = [], []
+    for h in body.hosts:
+        try:
+            db.execute(
+                """INSERT INTO hosts (name,ip,port,ssh_user,ssh_key,os_name,role,tags,excluded_pkgs,notes,sudo_pass,credential_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (h.name, h.ip, h.port, h.ssh_user, h.ssh_key, "", "", h.tags, "", "", "", h.credential_id),
+            )
+            db.commit()
+            added.append(h.name)
+        except sqlite3.IntegrityError:
+            skipped.append(h.name)
+    db.close()
+    return {"added": added, "skipped": skipped}
+
+
+@app.get("/api/hosts/{host_id}/ping")
+def ping_host(host_id: int):
+    db = get_db()
+    row = db.execute("SELECT ip, port FROM hosts WHERE id=?", (host_id,)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Host not found")
+    ip, port = row["ip"], int(row["port"] or 22)
+    t0 = time.monotonic()
+    try:
+        with socket.create_connection((ip, port), timeout=3):
+            pass
+        return {"reachable": True, "latency_ms": int((time.monotonic() - t0) * 1000)}
+    except Exception:
+        return {"reachable": False, "latency_ms": None}
 
 
 # ---------------------------------------------------------------------------

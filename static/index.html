@@ -341,6 +341,31 @@ tr:hover td{background:var(--bg)}
   </div>
 </div>
 
+<!-- Bulk Import Modal -->
+<div class="modal-bg" id="modal-bulk-import">
+  <div class="modal" style="width:540px">
+    <h3>Bulk import hosts</h3>
+    <div class="form-hint" style="margin-bottom:12px">One host per line. Format: <code>hostname ip</code> or just <code>ip</code> (hostname defaults to IP).</div>
+    <div class="form-row"><label>Hosts</label>
+      <textarea id="bi-hosts" rows="8" placeholder="web-01 192.168.1.10&#10;192.168.1.11&#10;db-01 192.168.1.20" style="font-family:'SF Mono',Monaco,monospace;font-size:12px;resize:vertical"></textarea>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Credential set</label>
+        <select id="bi-credential" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px">
+          <option value="0">Manual (default settings)</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Port</label><input id="bi-port" type="number" value="22"></div>
+    </div>
+    <div class="form-row"><label>Tags <span style="color:var(--text3);font-weight:400">(applied to all)</span></label><input id="bi-tags" placeholder="production, web"></div>
+    <div id="bi-result" style="display:none;margin-top:10px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-bulk-import')">Close</button>
+      <button class="btn btn-primary" onclick="saveBulkImport()"><i class="ti ti-file-import"></i>Import</button>
+    </div>
+  </div>
+</div>
+
 <!-- Log Modal -->
 <div class="modal-bg" id="modal-log">
   <div class="modal" style="width:600px">
@@ -616,6 +641,7 @@ async function hosts() {
     <h2>Hosts</h2>
     <div class="btn-row">
       <div class="search"><i class="ti ti-search"></i><input type="text" placeholder="Filter by name, IP, tag..." oninput="filterHosts(this.value)" id="host-search"></div>
+      <button class="btn" onclick="openBulkImportModal()"><i class="ti ti-file-import"></i>Bulk import</button>
       <button class="btn btn-primary" onclick="openAddHostModal()"><i class="ti ti-plus"></i>Add host</button>
     </div>
   </div>
@@ -646,8 +672,10 @@ function hostsRows(hs) {
     <td>${diskBar(h)}</td>
     <td>${uptimeStr(h)}</td>
     <td><div class="btn-row">
+      <button class="btn btn-sm btn-icon" onclick="pingHost(${h.id},this)" title="Ping"><i class="ti ti-activity-heartbeat"></i></button>
       <button class="btn btn-sm btn-icon" onclick="scanOne(${h.id})" title="Scan"><i class="ti ti-refresh"></i></button>
       <button class="btn btn-sm btn-icon" onclick="editHost(${h.id})" title="Edit"><i class="ti ti-pencil"></i></button>
+      <button class="btn btn-sm btn-icon" onclick="cloneHost(${h.id})" title="Clone"><i class="ti ti-copy"></i></button>
       <button class="btn btn-sm btn-icon" onclick="showHostHistory(${h.id},'${h.name}')" title="History"><i class="ti ti-history"></i></button>
       ${h.scan && h.scan.reboot_req ? `<button class="btn btn-sm btn-amber btn-icon" onclick="rebootHost(${h.id},'${h.name}')" title="Reboot"><i class="ti ti-power"></i></button>` : ''}
       ${h.scan && h.scan.pkg_count > 0 ? `<button class="btn btn-sm btn-primary" onclick="patchOne(${h.id})"><i class="ti ti-bolt"></i></button>` : ''}
@@ -1443,6 +1471,70 @@ async function removeHost(id, name) {
   if (!confirm(`Remove ${name}? This will delete all scan data for this host.`)) return;
   await api('DELETE', `/hosts/${id}`);
   render();
+}
+
+function cloneHost(id) {
+  const h = S.hosts.find(x => x.id === id);
+  if (!h) return;
+  document.getElementById('ah-credential').innerHTML = _credentialOptions(h.credential_id);
+  document.getElementById('ah-name').value = h.name + '-copy';
+  document.getElementById('ah-ip').value = h.ip;
+  document.getElementById('ah-port').value = h.port || 22;
+  document.getElementById('ah-user').value = h.ssh_user || 'root';
+  document.getElementById('ah-key').value = h.ssh_key || '~/.ssh/id_ed25519';
+  document.getElementById('ah-sudo-pass').value = '';
+  document.getElementById('ah-os').value = h.os_name || '';
+  document.getElementById('ah-role').value = h.role || '';
+  document.getElementById('ah-tags').value = h.tags || '';
+  document.getElementById('ah-excluded').value = h.excluded_pkgs || '';
+  document.getElementById('ah-notes').value = h.notes || '';
+  onCredentialChange('ah');
+  openModal('modal-add-host');
+}
+
+async function pingHost(id, btn) {
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader-2" style="animation:spin 1s linear infinite"></i>';
+  try {
+    const res = await api('GET', `/hosts/${id}/ping`);
+    btn.innerHTML = res.reachable
+      ? `<i class="ti ti-check" style="color:var(--green)"></i><span style="font-size:10px">${res.latency_ms}ms</span>`
+      : `<i class="ti ti-x" style="color:var(--red)"></i>`;
+    setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 3000);
+  } catch(e) { btn.innerHTML = orig; btn.disabled = false; }
+}
+
+function openBulkImportModal() {
+  document.getElementById('bi-credential').innerHTML = _credentialOptions(null);
+  document.getElementById('bi-hosts').value = '';
+  document.getElementById('bi-tags').value = '';
+  document.getElementById('bi-port').value = '22';
+  document.getElementById('bi-result').style.display = 'none';
+  openModal('modal-bulk-import');
+}
+
+async function saveBulkImport() {
+  const lines = document.getElementById('bi-hosts').value.trim().split('\n').filter(l => l.trim());
+  const credId = parseInt(document.getElementById('bi-credential').value) || 0;
+  const port = parseInt(document.getElementById('bi-port').value) || 22;
+  const tags = document.getElementById('bi-tags').value.trim();
+  const hosts = lines.map(line => {
+    const parts = line.trim().split(/\s+/);
+    const [name, ip] = parts.length >= 2 ? [parts[0], parts[1]] : [parts[0], parts[0]];
+    return { name, ip, port, credential_id: credId || null, tags };
+  }).filter(h => h.ip);
+  if (!hosts.length) { alert('No valid hosts to import'); return; }
+  try {
+    const res = await api('POST', '/hosts/bulk', { hosts });
+    const el = document.getElementById('bi-result');
+    el.style.display = '';
+    el.innerHTML = `<div style="padding:8px 10px;border-radius:var(--radius);background:var(--bg2);font-size:13px;display:flex;flex-direction:column;gap:4px">
+      ${res.added.length ? `<div style="color:var(--green)"><i class="ti ti-check"></i> Added: ${res.added.join(', ')}</div>` : ''}
+      ${res.skipped.length ? `<div style="color:var(--text3)"><i class="ti ti-minus"></i> Skipped (already exists): ${res.skipped.join(', ')}</div>` : ''}
+    </div>`;
+    if (res.added.length) render();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 async function toggleSchedule(id, enabled) {
