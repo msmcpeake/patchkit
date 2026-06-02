@@ -175,6 +175,7 @@ tr:hover td{background:var(--bg)}
     <nav>
       <div class="nav-item active" data-page="dashboard" onclick="nav('dashboard')"><i class="ti ti-layout-dashboard"></i>Dashboard</div>
       <div class="nav-item" data-page="hosts" onclick="nav('hosts')"><i class="ti ti-server"></i>Hosts</div>
+      <div class="nav-item" data-page="credentials" onclick="nav('credentials')"><i class="ti ti-key"></i>Credentials</div>
       <div class="nav-item" data-page="groups" onclick="nav('groups')"><i class="ti ti-tags"></i>Groups</div>
       <div class="nav-item" data-page="updates" onclick="nav('updates')"><i class="ti ti-package"></i>Updates</div>
 <div class="nav-item" data-page="schedule" onclick="nav('schedule')"><i class="ti ti-calendar-event"></i>Schedules</div>
@@ -191,6 +192,53 @@ tr:hover td{background:var(--bg)}
   <main class="main" id="main"></main>
 </div>
 
+<!-- Add Credential Modal -->
+<div class="modal-bg" id="modal-add-credential">
+  <div class="modal" style="width:540px">
+    <h3>Add credential set</h3>
+    <div class="form-grid">
+      <div class="form-row"><label>Name</label><input id="ac-name" placeholder="k8s nodes"></div>
+      <div class="form-row"><label>SSH user</label><input id="ac-user" value="root"></div>
+    </div>
+    <div class="form-row">
+      <label>Private key <span style="color:var(--text3);font-weight:400">(paste key content)</span></label>
+      <textarea id="ac-key" rows="7" style="font-family:'SF Mono',Monaco,monospace;font-size:11px;resize:vertical" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+    </div>
+    <div class="form-row">
+      <label>Sudo password <span style="color:var(--text3);font-weight:400">(optional)</span></label>
+      <input type="password" id="ac-sudo-pass" placeholder="Leave blank for NOPASSWD sudo">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-add-credential')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveCredential()"><i class="ti ti-plus"></i>Add credential</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Credential Modal -->
+<div class="modal-bg" id="modal-edit-credential">
+  <div class="modal" style="width:540px">
+    <h3>Edit credential set</h3>
+    <input type="hidden" id="ec-id">
+    <div class="form-grid">
+      <div class="form-row"><label>Name</label><input id="ec-name"></div>
+      <div class="form-row"><label>SSH user</label><input id="ec-user"></div>
+    </div>
+    <div class="form-row">
+      <label>Private key <span style="color:var(--text3);font-weight:400">(leave blank to keep existing)</span></label>
+      <textarea id="ec-key" rows="7" style="font-family:'SF Mono',Monaco,monospace;font-size:11px;resize:vertical" placeholder="Paste new key content to replace, or leave blank to keep existing"></textarea>
+    </div>
+    <div class="form-row">
+      <label>Sudo password <span style="color:var(--text3);font-weight:400">(leave blank to keep existing)</span></label>
+      <input type="password" id="ec-sudo-pass" placeholder="Leave blank to keep existing">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-edit-credential')">Cancel</button>
+      <button class="btn btn-primary" onclick="updateCredential()"><i class="ti ti-device-floppy"></i>Save changes</button>
+    </div>
+  </div>
+</div>
+
 <!-- Add Host Modal -->
 <div class="modal-bg" id="modal-add-host">
   <div class="modal">
@@ -198,13 +246,22 @@ tr:hover td{background:var(--bg)}
     <div class="form-grid">
       <div class="form-row"><label>Hostname</label><input id="ah-name" placeholder="nas-box"></div>
       <div class="form-row"><label>IP address</label><input id="ah-ip" placeholder="192.168.1.20"></div>
-      <div class="form-row"><label>SSH user</label><input id="ah-user" value="root"></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Credential set</label>
+        <select id="ah-credential" onchange="onCredentialChange('ah')" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px">
+          <option value="0">— manual settings —</option>
+        </select>
+      </div>
       <div class="form-row"><label>SSH port</label><input id="ah-port" value="22" type="number"></div>
     </div>
-    <div class="form-row"><label>SSH key path</label><input id="ah-key" value="~/.ssh/id_ed25519"></div>
-    <div class="form-row"><label>Sudo password <span style="color:var(--text3);font-weight:400">(optional — used when SSH user is not root)</span></label>
-      <input type="password" id="ah-sudo-pass" placeholder="Leave blank for NOPASSWD sudo">
-      <div class="form-hint">Empty = NOPASSWD. Set if your sudoers requires a password. Per-host overrides the global default.</div>
+    <div id="ah-auth-section">
+      <div class="form-row"><label>SSH user</label><input id="ah-user" value="root"></div>
+      <div class="form-row"><label>SSH key path</label><input id="ah-key" value="~/.ssh/id_ed25519"></div>
+      <div class="form-row"><label>Sudo password <span style="color:var(--text3);font-weight:400">(optional)</span></label>
+        <input type="password" id="ah-sudo-pass" placeholder="Leave blank for NOPASSWD sudo">
+        <div class="form-hint">Empty = NOPASSWD. Per-host overrides global default.</div>
+      </div>
     </div>
     <div class="form-grid">
       <div class="form-row"><label>OS <span style="color:var(--text3);font-weight:400">(auto-detected on scan)</span></label>
@@ -245,13 +302,22 @@ tr:hover td{background:var(--bg)}
     <div class="form-grid">
       <div class="form-row"><label>Hostname</label><input id="eh-name" placeholder="nas-box"></div>
       <div class="form-row"><label>IP address</label><input id="eh-ip" placeholder="192.168.1.20"></div>
-      <div class="form-row"><label>SSH user</label><input id="eh-user"></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Credential set</label>
+        <select id="eh-credential" onchange="onCredentialChange('eh')" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px">
+          <option value="0">— manual settings —</option>
+        </select>
+      </div>
       <div class="form-row"><label>SSH port</label><input id="eh-port" type="number"></div>
     </div>
-    <div class="form-row"><label>SSH key path</label><input id="eh-key"></div>
-    <div class="form-row"><label>Sudo password <span style="color:var(--text3);font-weight:400">(optional)</span></label>
-      <input type="password" id="eh-sudo-pass" placeholder="Leave blank to keep existing">
-      <div class="form-hint">Empty = keep existing. Set to change. Per-host overrides the global default.</div>
+    <div id="eh-auth-section">
+      <div class="form-row"><label>SSH user</label><input id="eh-user"></div>
+      <div class="form-row"><label>SSH key path</label><input id="eh-key"></div>
+      <div class="form-row"><label>Sudo password <span style="color:var(--text3);font-weight:400">(optional)</span></label>
+        <input type="password" id="eh-sudo-pass" placeholder="Leave blank to keep existing">
+        <div class="form-hint">Empty = keep existing. Set to change.</div>
+      </div>
     </div>
     <div class="form-grid">
       <div class="form-row"><label>OS</label>
@@ -348,7 +414,7 @@ tr:hover td{background:var(--bg)}
 
 <script>
 // State
-let S = { page: 'dashboard', hosts: [], scanning: new Set(), patching: new Set() };
+let S = { page: 'dashboard', hosts: [], credentials: [], scanning: new Set(), patching: new Set() };
 
 // API
 async function api(method, path, body) {
@@ -387,10 +453,14 @@ async function loadHosts() {
   return S.hosts;
 }
 
+async function loadCredentials() {
+  try { S.credentials = await api('GET', '/credentials'); } catch(e) { S.credentials = []; }
+}
+
 // Silent background refresh — re-renders only if scan data changed, no spinner
 async function silentRefresh() {
   if (S.patching.size > 0 || S.scanning.size > 0) return;
-  if (!['dashboard','hosts','updates','groups'].includes(S.page)) return;
+  if (!['dashboard','hosts','updates','groups','credentials'].includes(S.page)) return;
   try {
     const snapshot = h => ({
       id: h.id, pkg: h.scan?.pkg_count, reboot: h.scan?.reboot_req,
@@ -411,8 +481,8 @@ async function silentRefresh() {
 async function render() {
   const el = document.getElementById('main');
   el.innerHTML = '<div style="padding:48px;text-align:center;color:var(--text3)"><i class="ti ti-loader-2" style="font-size:24px;animation:spin 1s linear infinite"></i></div>';
-  await loadHosts();
-  const pages = { dashboard, hosts, groups, updates, schedule, history, settings };
+  await Promise.all([loadHosts(), loadCredentials()]);
+  const pages = { dashboard, hosts, credentials, groups, updates, schedule, history, settings };
   el.innerHTML = (await (pages[S.page] || dashboard)()) || '';
   afterRender();
 }
@@ -545,7 +615,7 @@ async function hosts() {
     <h2>Hosts</h2>
     <div class="btn-row">
       <div class="search"><i class="ti ti-search"></i><input type="text" placeholder="Filter by name, IP, tag..." oninput="filterHosts(this.value)" id="host-search"></div>
-      <button class="btn btn-primary" onclick="openModal('modal-add-host')"><i class="ti ti-plus"></i>Add host</button>
+      <button class="btn btn-primary" onclick="openAddHostModal()"><i class="ti ti-plus"></i>Add host</button>
     </div>
   </div>
   <div class="card">
@@ -566,7 +636,10 @@ function hostsRows(hs) {
       ${h.notes ? `<div style="font-size:11px;color:var(--text2);font-style:italic;padding-left:14px;margin-top:1px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h.notes}">${h.notes}</div>` : ''}
     </td>
     <td class="mono" style="font-size:12px;color:var(--text2)">${h.ip}:${h.port}</td>
-    <td><span class="badge badge-gray">${h.os_name}</span>${h.ssh_user && h.ssh_user !== 'root' ? ` <span class="badge badge-gray" title="Connects as ${h.ssh_user}, uses sudo for privileged commands"><i class="ti ti-terminal"></i>sudo</span>` : ''}</td>
+    <td>
+      <span class="badge badge-gray">${h.os_name}</span>
+      ${(()=>{const cred=S.credentials.find(c=>c.id===h.credential_id);return cred?`<span class="badge badge-purple" title="Using credential: ${cred.name}"><i class="ti ti-key"></i>${cred.name}</span>`:h.ssh_user&&h.ssh_user!=='root'?`<span class="badge badge-gray" title="Connects as ${h.ssh_user}, uses sudo"><i class="ti ti-terminal"></i>sudo</span>`:''})()}
+    </td>
     <td>${tagBadges(h)}</td>
     <td>${statusBadge(h)}</td>
     <td>${diskBar(h)}</td>
@@ -593,6 +666,111 @@ function filterHosts(q) {
     (h.tags||'').toLowerCase().includes(lq)
   ) : S.hosts;
   tbody.innerHTML = hostsRows(filtered);
+}
+
+// --- Credentials page ---
+async function credentials() {
+  const creds = S.credentials;
+  return `
+  <div class="topbar">
+    <h2>Credentials</h2>
+    <button class="btn btn-primary" onclick="openAddCredentialModal()"><i class="ti ti-plus"></i>Add credential</button>
+  </div>
+  <div class="card">
+    <div class="card-header"><h3><i class="ti ti-key"></i>SSH credential sets</h3></div>
+    ${creds.length === 0
+      ? `<div class="empty"><i class="ti ti-key-off"></i><p>No credential sets yet.<br>Add one to store SSH keys in the database and assign to hosts.</p></div>`
+      : `<table>
+      <thead><tr><th>Name</th><th>User</th><th>Fingerprint</th><th>Hosts</th><th></th></tr></thead>
+      <tbody>
+        ${creds.map(c => `<tr>
+          <td><strong>${c.name}</strong></td>
+          <td class="mono" style="font-size:12px">${c.ssh_user}</td>
+          <td class="mono" style="font-size:11px;color:var(--text3)">${c.fingerprint || '—'}</td>
+          <td><span class="badge badge-gray">${c.host_count} host${c.host_count !== 1 ? 's' : ''}</span></td>
+          <td><div class="btn-row">
+            <button class="btn btn-sm btn-icon" onclick="editCredential(${c.id})" title="Edit"><i class="ti ti-pencil"></i></button>
+            <button class="btn btn-sm btn-icon btn-danger" onclick="deleteCredential(${c.id},'${c.name}')" title="Delete"><i class="ti ti-trash"></i></button>
+          </div></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`}
+  </div>`;
+}
+
+function openAddCredentialModal() {
+  document.getElementById('ac-name').value = '';
+  document.getElementById('ac-user').value = 'root';
+  document.getElementById('ac-key').value = '';
+  document.getElementById('ac-sudo-pass').value = '';
+  openModal('modal-add-credential');
+}
+
+async function saveCredential() {
+  const body = {
+    name:      document.getElementById('ac-name').value.trim(),
+    ssh_user:  document.getElementById('ac-user').value.trim(),
+    ssh_key:   document.getElementById('ac-key').value.trim(),
+    sudo_pass: document.getElementById('ac-sudo-pass').value,
+  };
+  if (!body.name) { alert('Name is required'); return; }
+  if (!body.ssh_key) { alert('Private key is required'); return; }
+  try {
+    await api('POST', '/credentials', body);
+    closeModal('modal-add-credential');
+    render();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function editCredential(id) {
+  try {
+    const c = await api('GET', `/credentials/${id}`);
+    document.getElementById('ec-id').value = c.id;
+    document.getElementById('ec-name').value = c.name;
+    document.getElementById('ec-user').value = c.ssh_user;
+    document.getElementById('ec-key').value = '';
+    document.getElementById('ec-sudo-pass').value = '';
+    openModal('modal-edit-credential');
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function updateCredential() {
+  const id = parseInt(document.getElementById('ec-id').value);
+  const body = {
+    name:      document.getElementById('ec-name').value.trim(),
+    ssh_user:  document.getElementById('ec-user').value.trim(),
+  };
+  const key  = document.getElementById('ec-key').value.trim();
+  const pass = document.getElementById('ec-sudo-pass').value;
+  if (key)  body.ssh_key   = key;
+  if (pass) body.sudo_pass = pass;
+  if (!body.name) { alert('Name is required'); return; }
+  try {
+    await api('PATCH', `/credentials/${id}`, body);
+    closeModal('modal-edit-credential');
+    render();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function deleteCredential(id, name) {
+  if (!confirm(`Delete credential "${name}"?\n\nHosts assigned to this credential will fall back to their manual settings.`)) return;
+  try {
+    await api('DELETE', `/credentials/${id}`);
+    render();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function _credentialOptions(selectedId) {
+  return `<option value="0"${!selectedId ? ' selected' : ''}>— manual settings —</option>` +
+    S.credentials.map(c =>
+      `<option value="${c.id}"${c.id === selectedId ? ' selected' : ''}>${c.name} (${c.ssh_user})</option>`
+    ).join('');
+}
+
+function onCredentialChange(prefix) {
+  const credId = parseInt(document.getElementById(`${prefix}-credential`).value) || 0;
+  const section = document.getElementById(`${prefix}-auth-section`);
+  if (section) section.style.display = credId ? 'none' : '';
 }
 
 // --- Updates page ---
@@ -1180,18 +1358,20 @@ async function detectOsExisting() {
 }
 
 async function saveHost() {
+  const credId = parseInt(document.getElementById('ah-credential').value) || 0;
   const body = {
     name: document.getElementById('ah-name').value.trim(),
     ip: document.getElementById('ah-ip').value.trim(),
-    ssh_user: document.getElementById('ah-user').value.trim(),
     port: parseInt(document.getElementById('ah-port').value),
-    ssh_key: document.getElementById('ah-key').value.trim(),
+    credential_id: credId || null,
+    ssh_user: credId ? '' : document.getElementById('ah-user').value.trim(),
+    ssh_key:  credId ? '' : document.getElementById('ah-key').value.trim(),
+    sudo_pass: credId ? '' : document.getElementById('ah-sudo-pass').value,
     os_name: document.getElementById('ah-os').value.trim(),
     role: document.getElementById('ah-role').value.trim(),
     tags: document.getElementById('ah-tags').value.trim(),
     excluded_pkgs: document.getElementById('ah-excluded').value.trim(),
     notes: document.getElementById('ah-notes').value.trim(),
-    sudo_pass: document.getElementById('ah-sudo-pass').value,
   };
   if (!body.name || !body.ip) { alert('Name and IP are required'); return; }
   try {
@@ -1207,40 +1387,54 @@ function editHost(id) {
   document.getElementById('eh-id').value = h.id;
   document.getElementById('eh-name').value = h.name;
   document.getElementById('eh-ip').value = h.ip;
-  document.getElementById('eh-user').value = h.ssh_user || 'root';
   document.getElementById('eh-port').value = h.port || 22;
+  document.getElementById('eh-user').value = h.ssh_user || 'root';
   document.getElementById('eh-key').value = h.ssh_key || '~/.ssh/id_ed25519';
+  document.getElementById('eh-sudo-pass').value = '';
   document.getElementById('eh-role').value = h.role || '';
   document.getElementById('eh-tags').value = h.tags || '';
   document.getElementById('eh-excluded').value = h.excluded_pkgs || '';
   document.getElementById('eh-notes').value = h.notes || '';
   document.getElementById('eh-os').value = h.os_name || '';
+  // Populate credential dropdown
+  document.getElementById('eh-credential').innerHTML = _credentialOptions(h.credential_id);
+  document.getElementById('ah-credential').innerHTML = _credentialOptions(null);
+  onCredentialChange('eh');
   openModal('modal-edit-host');
 }
 
 async function updateHost() {
   const id = parseInt(document.getElementById('eh-id').value);
+  const credId = parseInt(document.getElementById('eh-credential').value) || 0;
   const body = {
     name:         document.getElementById('eh-name').value.trim(),
     ip:           document.getElementById('eh-ip').value.trim(),
-    ssh_user:     document.getElementById('eh-user').value.trim(),
     port:         parseInt(document.getElementById('eh-port').value),
-    ssh_key:      document.getElementById('eh-key').value.trim(),
+    credential_id: credId,  // 0 = clear, >0 = set
     os_name:      document.getElementById('eh-os').value.trim(),
     role:         document.getElementById('eh-role').value.trim(),
     tags:         document.getElementById('eh-tags').value.trim(),
     excluded_pkgs: document.getElementById('eh-excluded').value.trim(),
     notes:        document.getElementById('eh-notes').value.trim(),
-    sudo_pass:    document.getElementById('eh-sudo-pass').value,
   };
+  if (!credId) {
+    body.ssh_user  = document.getElementById('eh-user').value.trim();
+    body.ssh_key   = document.getElementById('eh-key').value.trim();
+    body.sudo_pass = document.getElementById('eh-sudo-pass').value;
+    if (body.sudo_pass === '') delete body.sudo_pass;
+  }
   if (!body.name || !body.ip) { alert('Name and IP are required'); return; }
-  // Don't send sudo_pass if left blank — backend skips empty strings to preserve existing
-  if (body.sudo_pass === '') delete body.sudo_pass;
   try {
     await api('PATCH', `/hosts/${id}`, body);
     closeModal('modal-edit-host');
     render();
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+function openAddHostModal() {
+  document.getElementById('ah-credential').innerHTML = _credentialOptions(null);
+  document.getElementById('ah-auth-section').style.display = '';
+  openModal('modal-add-host');
 }
 
 async function removeHost(id, name) {

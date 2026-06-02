@@ -4,6 +4,9 @@ Run: uvicorn app:app --host 0.0.0.0 --port 8080 --reload
 """
 
 import asyncio
+import base64
+import hashlib
+import io
 import json
 import os
 import re
@@ -32,9 +35,19 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = Path("patchkit_known_hosts")
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 
 CHANGELOG = [
+    {
+        "version": "1.7.0",
+        "date": "2026-06-02",
+        "changes": [
+            "Credential sets: define reusable SSH auth (user, private key, sudo password) and assign to hosts",
+            "Private keys stored in the database — no more path management per host",
+            "Credentials page with fingerprint display and per-credential host count",
+            "Host add/edit: credential dropdown collapses manual auth fields when a set is selected",
+        ],
+    },
     {
         "version": "1.6.1",
         "date": "2026-06-02",
@@ -261,6 +274,15 @@ def init_db():
             next_run    TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS credentials (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            ssh_user    TEXT DEFAULT 'root',
+            ssh_key     TEXT DEFAULT '',
+            sudo_pass   TEXT DEFAULT '',
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT
@@ -294,6 +316,7 @@ def _migrate_db():
         "ALTER TABLE hosts ADD COLUMN excluded_pkgs TEXT DEFAULT ''",
         "ALTER TABLE hosts ADD COLUMN notes TEXT DEFAULT ''",
         "ALTER TABLE hosts ADD COLUMN sudo_pass TEXT DEFAULT ''",
+        "ALTER TABLE hosts ADD COLUMN credential_id INTEGER",
     ]
     db = get_db()
     for sql in migrations:
@@ -325,6 +348,7 @@ class HostCreate(BaseModel):
     excluded_pkgs: str = ""
     notes: str = ""
     sudo_pass: str = ""
+    credential_id: Optional[int] = None
 
 class TempHostSpec(BaseModel):
     ip: str
@@ -344,10 +368,23 @@ class HostUpdate(BaseModel):
     excluded_pkgs: Optional[str] = None
     notes: Optional[str] = None
     sudo_pass: Optional[str] = None
+    credential_id: Optional[int] = None
     enabled: Optional[int] = None
 
 class SettingsPayload(BaseModel):
     settings: dict[str, str]
+
+class CredentialCreate(BaseModel):
+    name: str
+    ssh_user: str = "root"
+    ssh_key: str = ""
+    sudo_pass: str = ""
+
+class CredentialUpdate(BaseModel):
+    name: Optional[str] = None
+    ssh_user: Optional[str] = None
+    ssh_key: Optional[str] = None
+    sudo_pass: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +409,29 @@ def _load_key(key_path: Path) -> paramiko.PKey:
     raise RuntimeError(f"Could not load SSH key {key_path}: {last_exc}")
 
 
+def _load_key_content(content: str) -> paramiko.PKey:
+    last_exc = None
+    for cls in (paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.RSAKey):
+        try:
+            return cls.from_private_key(io.StringIO(content))
+        except paramiko.ssh_exception.PasswordRequiredException:
+            raise RuntimeError("SSH key is passphrase-protected")
+        except Exception as e:
+            last_exc = e
+    raise RuntimeError(f"Could not load SSH key: {last_exc}")
+
+
+def _key_fingerprint(content: str) -> str:
+    if not (content or "").strip():
+        return ""
+    try:
+        key = _load_key_content(content)
+        digest = hashlib.sha256(key.asbytes()).digest()
+        return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+    except Exception:
+        return "invalid"
+
+
 def _make_ssh_client() -> paramiko.SSHClient:
     """Create an SSHClient with TOFU known-hosts verification."""
     client = paramiko.SSHClient()
@@ -387,15 +447,27 @@ def _save_host_key(client: paramiko.SSHClient):
         client.save_host_keys(str(KNOWN_HOSTS))
 
 
-def ssh_connect(host: sqlite3.Row) -> paramiko.SSHClient:
+def ssh_connect(host) -> paramiko.SSHClient:
     db = get_db()
     defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+    cred_id = None
+    try:
+        cred_id = host["credential_id"]
+    except (KeyError, IndexError):
+        pass
+    cred = db.execute("SELECT * FROM credentials WHERE id=?", (cred_id,)).fetchone() if cred_id else None
     db.close()
-    key_path = _expand_key(host["ssh_key"] or defaults.get("ssh_key", "~/.ssh/id_ed25519"))
-    user     = host["ssh_user"] or defaults.get("ssh_user", "root")
-    port     = int(host["port"] or defaults.get("ssh_port", 22))
-    timeout  = int(defaults.get("ssh_timeout", 10))
-    pkey = _load_key(key_path)
+
+    port    = int(host["port"] or defaults.get("ssh_port", 22))
+    timeout = int(defaults.get("ssh_timeout", 10))
+
+    if cred:
+        user = cred["ssh_user"] or defaults.get("ssh_user", "root")
+        pkey = _load_key_content(cred["ssh_key"])
+    else:
+        user = host["ssh_user"] or defaults.get("ssh_user", "root")
+        pkey = _load_key(_expand_key(host["ssh_key"] or defaults.get("ssh_key", "~/.ssh/id_ed25519")))
+
     client = _make_ssh_client()
     client.connect(
         hostname=host["ip"], port=port, username=user, pkey=pkey,
@@ -423,10 +495,26 @@ async def ssh_connect_async(host: sqlite3.Row, max_attempts: int = 3) -> paramik
 def _resolve_sudo_pass(host, defaults: dict) -> Optional[str]:
     """Return the sudo password for this host, or None if sudo is not needed.
 
-    Returns None when ssh_user is 'root' (no sudo).
+    Credential (if assigned) → per-host sudo_pass → global sudo_pass setting.
+    Returns None when the effective user is root (no sudo needed).
     Returns '' for NOPASSWD sudo, or the password string when one is configured.
-    Per-host sudo_pass takes precedence over the global setting.
     """
+    cred_id = None
+    try:
+        cred_id = host["credential_id"]
+    except (KeyError, IndexError):
+        pass
+
+    if cred_id:
+        db = get_db()
+        cred = db.execute("SELECT * FROM credentials WHERE id=?", (cred_id,)).fetchone()
+        db.close()
+        if cred:
+            user = (cred["ssh_user"] or defaults.get("ssh_user", "root")).strip()
+            if user == "root":
+                return None
+            return (cred["sudo_pass"] or "").strip()
+
     user = (host["ssh_user"] or defaults.get("ssh_user", "root")).strip()
     if user == "root":
         return None
@@ -1373,10 +1461,11 @@ def add_host(body: HostCreate):
     db = get_db()
     try:
         db.execute(
-            """INSERT INTO hosts (name,ip,port,ssh_user,ssh_key,os_name,role,tags,excluded_pkgs,notes,sudo_pass)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO hosts (name,ip,port,ssh_user,ssh_key,os_name,role,tags,excluded_pkgs,notes,sudo_pass,credential_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (body.name, body.ip, body.port, body.ssh_user, body.ssh_key,
-             body.os_name, body.role, body.tags, body.excluded_pkgs, body.notes, body.sudo_pass),
+             body.os_name, body.role, body.tags, body.excluded_pkgs, body.notes,
+             body.sudo_pass, body.credential_id),
         )
         db.commit()
     except sqlite3.IntegrityError:
@@ -1387,15 +1476,18 @@ def add_host(body: HostCreate):
     return {"id": hid, "name": body.name}
 
 
-_ALLOWED_HOST_COLUMNS = {"name", "ip", "port", "ssh_user", "ssh_key", "os_name", "role", "tags", "excluded_pkgs", "notes", "sudo_pass", "enabled"}
+_ALLOWED_HOST_COLUMNS = {"name", "ip", "port", "ssh_user", "ssh_key", "os_name", "role", "tags", "excluded_pkgs", "notes", "sudo_pass", "credential_id", "enabled"}
 
 
 @app.patch("/api/hosts/{host_id}")
 def update_host(host_id: int, body: HostUpdate):
     db = get_db()
     fields = {k: v for k, v in body.dict().items() if v is not None and k in _ALLOWED_HOST_COLUMNS}
-    # Empty sudo_pass on PATCH means "keep existing" — only update when explicitly provided
+    # Empty sudo_pass on PATCH means "keep existing"
     fields.pop("sudo_pass", None) if fields.get("sudo_pass") == "" else None
+    # credential_id=0 means "clear credential" → store NULL
+    if fields.get("credential_id") == 0:
+        fields["credential_id"] = None
     if not fields:
         db.close()
         return {"ok": True}
@@ -1415,6 +1507,94 @@ def delete_host(host_id: int):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Credential routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/credentials")
+def list_credentials():
+    db = get_db()
+    rows = [dict(r) for r in db.execute("SELECT * FROM credentials ORDER BY name")]
+    for r in rows:
+        r["fingerprint"] = _key_fingerprint(r.get("ssh_key", ""))
+        r["host_count"] = db.execute(
+            "SELECT COUNT(*) FROM hosts WHERE credential_id=?", (r["id"],)
+        ).fetchone()[0]
+        del r["ssh_key"]   # don't expose key content in list
+        del r["sudo_pass"] # don't expose password in list
+    db.close()
+    return rows
+
+
+@app.get("/api/credentials/{cid}")
+def get_credential(cid: int):
+    db = get_db()
+    row = db.execute("SELECT * FROM credentials WHERE id=?", (cid,)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Credential not found")
+    r = dict(row)
+    r["fingerprint"] = _key_fingerprint(r.get("ssh_key", ""))
+    return r
+
+
+@app.post("/api/credentials", status_code=201)
+def add_credential(body: CredentialCreate):
+    if body.ssh_key.strip():
+        try:
+            _load_key_content(body.ssh_key)
+        except Exception as e:
+            raise HTTPException(400, f"Invalid SSH key: {e}")
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO credentials (name, ssh_user, ssh_key, sudo_pass) VALUES (?,?,?,?)",
+            (body.name, body.ssh_user, body.ssh_key, body.sudo_pass),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.close()
+        raise HTTPException(409, f"Credential '{body.name}' already exists")
+    cid = db.execute("SELECT id FROM credentials WHERE name=?", (body.name,)).fetchone()["id"]
+    db.close()
+    return {"id": cid, "name": body.name}
+
+
+@app.patch("/api/credentials/{cid}")
+def update_credential(cid: int, body: CredentialUpdate):
+    db = get_db()
+    fields: dict = {}
+    if body.name is not None:
+        fields["name"] = body.name
+    if body.ssh_user is not None:
+        fields["ssh_user"] = body.ssh_user
+    if body.ssh_key is not None and body.ssh_key.strip():
+        try:
+            _load_key_content(body.ssh_key)
+        except Exception as e:
+            db.close()
+            raise HTTPException(400, f"Invalid SSH key: {e}")
+        fields["ssh_key"] = body.ssh_key
+    if body.sudo_pass is not None:
+        fields["sudo_pass"] = body.sudo_pass
+    if fields:
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        db.execute(f"UPDATE credentials SET {set_clause} WHERE id=?", (*fields.values(), cid))
+        db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/credentials/{cid}")
+def delete_credential(cid: int):
+    db = get_db()
+    db.execute("UPDATE hosts SET credential_id=NULL WHERE credential_id=?", (cid,))
+    db.execute("DELETE FROM credentials WHERE id=?", (cid,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
 @app.get("/api/hosts/{host_id}/test")
 def test_host(host_id: int):
     import traceback, stat
@@ -1424,31 +1604,49 @@ def test_host(host_id: int):
         db.close()
         raise HTTPException(404, "Host not found")
     defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+    cred = db.execute("SELECT * FROM credentials WHERE id=?", (row["credential_id"],)).fetchone() \
+           if row["credential_id"] else None
     db.close()
-    key_path = _expand_key(row["ssh_key"] or defaults.get("ssh_key", "~/.ssh/id_ed25519"))
-    user     = row["ssh_user"] or defaults.get("ssh_user", "root")
-    port     = int(row["port"] or defaults.get("ssh_port", 22))
-    timeout  = int(defaults.get("ssh_timeout", 10))
+
+    user    = (cred["ssh_user"] if cred else row["ssh_user"]) or defaults.get("ssh_user", "root")
+    port    = int(row["port"] or defaults.get("ssh_port", 22))
+    timeout = int(defaults.get("ssh_timeout", 10))
     steps = {
         "host": row["name"], "ip": row["ip"], "port": port, "user": user,
-        "key_path": str(key_path), "key_exists": key_path.exists(),
+        "credential": cred["name"] if cred else None,
+        "key_path": None, "key_exists": None,
         "key_stat": None, "key_load": None, "connect": None, "error": None,
     }
-    if not key_path.exists():
-        steps["error"] = f"Key file not found: {key_path}"
-        return steps
-    s = key_path.stat()
-    steps["key_stat"] = oct(stat.S_IMODE(s.st_mode))
-    try:
-        _load_key(key_path)
-        steps["key_load"] = "ok"
-    except Exception as e:
-        steps["key_load"] = "FAILED"
-        steps["error"] = str(e)
-        return steps
+
+    if cred:
+        steps["key_path"] = f"[credential: {cred['name']}]"
+        steps["key_exists"] = True
+        try:
+            pkey = _load_key_content(cred["ssh_key"])
+            steps["key_load"] = "ok"
+        except Exception as e:
+            steps["key_load"] = "FAILED"
+            steps["error"] = str(e)
+            return steps
+    else:
+        key_path = _expand_key(row["ssh_key"] or defaults.get("ssh_key", "~/.ssh/id_ed25519"))
+        steps["key_path"] = str(key_path)
+        steps["key_exists"] = key_path.exists()
+        if not key_path.exists():
+            steps["error"] = f"Key file not found: {key_path}"
+            return steps
+        s = key_path.stat()
+        steps["key_stat"] = oct(stat.S_IMODE(s.st_mode))
+        try:
+            pkey = _load_key(key_path)
+            steps["key_load"] = "ok"
+        except Exception as e:
+            steps["key_load"] = "FAILED"
+            steps["error"] = str(e)
+            return steps
+
     try:
         client = _make_ssh_client()
-        pkey = _load_key(key_path)
         client.connect(
             hostname=row["ip"], port=port, username=user, pkey=pkey,
             timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
