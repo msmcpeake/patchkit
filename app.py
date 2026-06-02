@@ -43,7 +43,7 @@ CHANGELOG = [
         "date": "2026-06-02",
         "changes": [
             "Credential sets: define reusable SSH auth (user, private key, sudo password) and assign to hosts",
-            "Private keys stored in the database — no more path management per host",
+            "Private keys stored in the database; no more path management per host",
             "Credentials page with fingerprint display and per-credential host count",
             "Host add/edit: credential dropdown collapses manual auth fields when a set is selected",
         ],
@@ -98,7 +98,7 @@ CHANGELOG = [
         "version": "1.5.0",
         "date": "2026-06-01",
         "changes": [
-            "Rolling reboot for host groups — reboots one node at a time, waits for SSH recovery before proceeding",
+            "Rolling reboot for host groups: reboots one node at a time, waits for SSH recovery before proceeding",
             "Automatic rescan after reboot (normal and rolling) to clear the reboot-required flag",
             "Auto-refresh: dashboard, hosts, updates, and groups silently refresh every 30s when scan data changes",
         ],
@@ -201,7 +201,7 @@ app = FastAPI(title="PatchKit", lifespan=lifespan)
 async def forward_auth_middleware(request: Request, call_next):
     if _AUTH_HEADER and not request.headers.get(_AUTH_HEADER):
         return Response(
-            "Unauthorized — forward auth header missing. "
+            "Unauthorized: forward auth header missing. "
             "Ensure your reverse proxy is configured.",
             status_code=401,
             media_type="text/plain",
@@ -602,8 +602,8 @@ def _pkg_manager(os_name: str) -> str:
 def detect_os(client: paramiko.SSHClient) -> tuple[str, str]:
     """Return (human_os_name, pkg_mgr) by probing the remote host directly.
 
-    The package manager is determined by which binary exists on the host —
-    never inferred from the OS name — so unusual distros work automatically.
+    The package manager is determined by which binary exists on the host;
+    never inferred from the OS name, so unusual distros work automatically.
     """
     # ── Step 1: probe for the actual package manager ──────────────────────
     _, pm_out, _ = ssh_run(
@@ -675,7 +675,7 @@ def parse_dnf_upgradeable(upd_raw: str, inst_raw: str) -> list[dict]:
         if len(parts) == 2:
             installed[parts[0]] = parts[1]
 
-    # Header/noise lines to skip (do NOT include '' — startswith('') is always True)
+    # Header/noise lines to skip (do NOT include '' (startswith('') is always True)
     skip_prefixes = (
         'last metadata', 'updated packages', 'available upgrades',
         'obsoleting', 'updating and loading', 'repositories loaded',
@@ -819,7 +819,7 @@ def _send_webhook_sync(url: str, template: str, host_name: str,
         payload = body_str.encode()
     else:
         payload = json.dumps({
-            "title":       f"PatchKit: {host_name} — {result.upper()}",
+            "title":       f"PatchKit: {host_name} - {result.upper()}",
             "message":     f"{pkg_count} package(s) upgraded in {duration}s",
             "host":        host_name,
             "result":      result,
@@ -874,7 +874,7 @@ def _acquire_lock(host_id: int) -> bool:
     if _try_create():
         return True
 
-    # Lock file exists — check if owning process is still alive
+    # Lock file exists: check if owning process is still alive
     try:
         pid = int(p.read_text().split()[0])
         os.kill(pid, 0)   # raises if process is gone
@@ -949,7 +949,7 @@ async def scan_host_async(host_id: int) -> dict:
                     )
                     sec_names = parse_dnf_security_pkgnames(sec_out)
                     # Detect when the distro has no advisory system (e.g. Nobara, vanilla Fedora).
-                    # "No advisory found" means the metadata simply isn't there — don't mark
+                    # "No advisory found" means the metadata simply isn't there; don't mark
                     # packages as is_security=False when we have no data to back that up.
                     no_advisory_data = (
                         not sec_names and
@@ -1090,7 +1090,7 @@ async def patch_host_stream(host_id: int):
                 None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", 30, sudo_pass=sudo_pass)
             )
             pkgs = parse_upgradeable(out)
-        else:  # dnf — check-update refreshes metadata and lists in one shot
+        else:  # dnf: check-update refreshes metadata and lists in one shot
             yield emit("Running dnf check-update...")
             _, upd_out, _ = await loop.run_in_executor(
                 None, lambda: ssh_run(client, "dnf check-update 2>&1; exit 0", 90, sudo_pass=sudo_pass)
@@ -1105,7 +1105,7 @@ async def patch_host_stream(host_id: int):
 
         # ── Upgrade ───────────────────────────────────────────────────────
         if not pkgs:
-            yield emit("Nothing to upgrade — already up to date", "ok")
+            yield emit("Nothing to upgrade, already up to date", "ok")
         else:
             yield emit(f"Found {pkg_count} package(s) to upgrade")
             for p in pkgs:
@@ -1188,7 +1188,7 @@ async def patch_host_stream(host_id: int):
     yield emit(f"Done in {duration}s", "done")
 
     await _send_notification(
-        f"PatchKit: {host_name} — {run_result.upper()}",
+        f"PatchKit: {host_name} - {run_result.upper()}",
         f"Host: {host_name}\nResult: {run_result}\nPackages upgraded: {pkg_count}\n"
         f"Duration: {duration}s\n\nLog:\n" + "\n".join(log_lines),
     )
@@ -1361,7 +1361,7 @@ async def rolling_reboot_stream(tag: str, grace: int = 30):
             ts = datetime.now().strftime("%H:%M:%S")
             return f"data: {level}|[{ts}] {msg}\n\n"
 
-        yield emit(f"Rolling reboot — {len(hosts)} host(s) in group", "info")
+        yield emit(f"Rolling reboot: {len(hosts)} host(s) in group", "info")
 
         for i, host in enumerate(hosts, 1):
             name = host["name"]
@@ -1414,12 +1414,12 @@ async def rolling_reboot_stream(tag: str, grace: int = 30):
                     continue
 
             if not recovered:
-                yield emit(f"  {name} did not recover within 5 minutes — stopping", "error")
+                yield emit(f"  {name} did not recover within 5 minutes, stopping", "error")
                 yield "data: DONE\n\n"
                 return
 
             # Grace period for services to stabilise
-            yield emit(f"  {name} is back online — waiting {grace}s for services...", "ok")
+            yield emit(f"  {name} is back online, waiting {grace}s for services...", "ok")
             await asyncio.sleep(grace)
 
             # Rescan to clear reboot_req flag

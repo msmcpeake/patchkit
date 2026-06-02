@@ -250,7 +250,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-grid">
       <div class="form-row"><label>Credential set</label>
         <select id="ah-credential" onchange="onCredentialChange('ah')" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px">
-          <option value="0">— manual settings —</option>
+          <option value="0">Manual settings</option>
         </select>
       </div>
       <div class="form-row"><label>SSH port</label><input id="ah-port" value="22" type="number"></div>
@@ -306,7 +306,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-grid">
       <div class="form-row"><label>Credential set</label>
         <select id="eh-credential" onchange="onCredentialChange('eh')" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px">
-          <option value="0">— manual settings —</option>
+          <option value="0">Manual settings</option>
         </select>
       </div>
       <div class="form-row"><label>SSH port</label><input id="eh-port" type="number"></div>
@@ -361,7 +361,7 @@ tr:hover td{background:var(--bg)}
 <!-- Changelog Modal -->
 <div class="modal-bg" id="modal-changelog">
   <div class="modal" style="width:560px">
-    <h3 style="display:flex;align-items:center;gap:8px"><i class="ti ti-tag"></i>PatchKit — Changelog</h3>
+    <h3 style="display:flex;align-items:center;gap:8px"><i class="ti ti-tag"></i>PatchKit Changelog</h3>
     <div id="modal-changelog-body" style="max-height:480px;overflow-y:auto"></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal('modal-changelog')">Close</button></div>
   </div>
@@ -376,7 +376,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row">
       <label>Cron expression</label>
       <input id="es-cron" placeholder="0 2 * * *">
-      <div class="form-hint">Format: minute hour day month weekday — e.g. <code>0 2 * * *</code> (daily 2 am), <code>0 3 * * 0</code> (weekly Sun 3 am)</div>
+      <div class="form-hint">Format: minute hour day month weekday, e.g. <code>0 2 * * *</code> (daily 2 am), <code>0 3 * * 0</code> (weekly Sun 3 am)</div>
     </div>
     <div class="form-row">
       <label>Hosts</label>
@@ -398,7 +398,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row">
       <label>Cron expression</label>
       <input id="as-cron" placeholder="0 2 * * *">
-      <div class="form-hint">Format: minute hour day month weekday — e.g. <code>0 2 * * *</code> (daily 2 am), <code>0 3 * * 0</code> (weekly Sun 3 am)</div>
+      <div class="form-hint">Format: minute hour day month weekday, e.g. <code>0 2 * * *</code> (daily 2 am), <code>0 3 * * 0</code> (weekly Sun 3 am)</div>
     </div>
     <div class="form-row">
       <label>Hosts</label>
@@ -457,7 +457,7 @@ async function loadCredentials() {
   try { S.credentials = await api('GET', '/credentials'); } catch(e) { S.credentials = []; }
 }
 
-// Silent background refresh — re-renders only if scan data changed, no spinner
+// Silent background refresh: re-renders only if scan data changed, no spinner
 async function silentRefresh() {
   if (S.patching.size > 0 || S.scanning.size > 0) return;
   if (!['dashboard','hosts','updates','groups','credentials'].includes(S.page)) return;
@@ -507,7 +507,7 @@ function statusBadge(h) {
   if (S.scanning.has(h.id)) return `<span class="badge badge-gray"><i class="ti ti-refresh scan-spinner"></i>Scanning</span>`;
   if (!h.scan) return `<span class="badge badge-gray">Not scanned</span>`;
   if (h.scan.status === 'offline') {
-    const err = h.scan.error ? ` — ${h.scan.error}` : '';
+    const err = h.scan.error ? `: ${h.scan.error}` : '';
     return `<span class="badge badge-danger" title="${h.scan.error||'Connection failed'}"><i class="ti ti-wifi-off"></i>Offline${err.length < 40 ? err : ''}</span>`;
   }
   if (h.scan.status === 'warn') return `<span class="badge badge-warn"><i class="ti ti-alert-triangle"></i>${h.scan.pkg_count} updates</span>`;
@@ -525,7 +525,7 @@ function tagBadges(h) {
 }
 
 function diskBar(h) {
-  if (!h.scan || !h.scan.disk_used_pct) return '<span style="color:var(--text3);font-size:12px">—</span>';
+  if (!h.scan || !h.scan.disk_used_pct) return '<span style="color:var(--text3);font-size:12px">-</span>';
   const pct = parseInt(h.scan.disk_used_pct);
   const cls = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : '';
   return `<div class="disk-bar">
@@ -536,7 +536,7 @@ function diskBar(h) {
 }
 
 function uptimeStr(h) {
-  if (!h.scan || !h.scan.uptime_str) return '<span style="color:var(--text3);font-size:12px">—</span>';
+  if (!h.scan || !h.scan.uptime_str) return '<span style="color:var(--text3);font-size:12px">-</span>';
   return `<span style="font-size:11px;color:var(--text2)" title="${h.scan.uptime_str}">${h.scan.uptime_str.replace(/^up\s+/,'').split(',')[0]}</span>`;
 }
 
@@ -568,7 +568,7 @@ async function dashboard() {
       <button class="btn btn-primary" onclick="patchAll()"><i class="ti ti-bolt"></i>Patch all</button>
     </div>
   </div>
-  ${totalSec > 0 ? `<div class="alert alert-warn" style="cursor:pointer" onclick="nav('updates')"><i class="ti ti-shield-exclamation"></i><span><strong>${totalSec} security update${totalSec>1?'s':''}</strong> pending across ${hs.filter(h=>(h.scan?.packages||[]).some(p=>p.is_security)).length} host${hs.filter(h=>(h.scan?.packages||[]).some(p=>p.is_security)).length>1?'s':''} — click to view</span></div>` : ''}
+  ${totalSec > 0 ? `<div class="alert alert-warn" style="cursor:pointer" onclick="nav('updates')"><i class="ti ti-shield-exclamation"></i><span><strong>${totalSec} security update${totalSec>1?'s':''}</strong> pending across ${hs.filter(h=>(h.scan?.packages||[]).some(p=>p.is_security)).length} host${hs.filter(h=>(h.scan?.packages||[]).some(p=>p.is_security)).length>1?'s':''} , click to view</span></div>` : ''}
   ${reboots > 0 ? `<div class="alert alert-warn" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:8px"><i class="ti ti-alert-triangle"></i><span>${reboots} host${reboots>1?'s':''} pending reboot after kernel update</span></div><button class="btn btn-sm btn-amber" onclick="rebootAll()"><i class="ti ti-power"></i>Reboot all</button></div>` : ''}
   ${diskWarn > 0 ? `<div class="alert alert-warn"><i class="ti ti-database-exclamation"></i><span>${diskWarn} host${diskWarn>1?'s':''} with disk usage ≥ 85%</span></div>` : ''}
   <div class="metrics">
@@ -590,11 +590,11 @@ async function dashboard() {
             <div style="padding-left:14px;margin-top:2px">${tagBadges(h)}</div>
             ${h.notes ? `<div style="font-size:11px;color:var(--text2);font-style:italic;padding-left:14px;margin-top:2px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h.notes}">${h.notes}</div>` : ''}
           </td>
-          <td style="color:var(--text2)">${h.role||'—'}</td>
+          <td style="color:var(--text2)">${h.role||'-'}</td>
           <td>${statusBadge(h)}</td>
           <td>${diskBar(h)}</td>
           <td>${uptimeStr(h)}</td>
-          <td style="color:var(--text3);font-size:12px">${h.scan ? timeAgo(h.scan.scanned_at) : '—'}</td>
+          <td style="color:var(--text3);font-size:12px">${h.scan ? timeAgo(h.scan.scanned_at) : '-'}</td>
           <td><div class="btn-row">
             <button class="btn btn-sm btn-icon" onclick="scanOne(${h.id})" title="Scan now"><i class="ti ti-refresh"></i></button>
             ${h.scan && h.scan.reboot_req ? `<button class="btn btn-sm btn-amber" onclick="rebootHost(${h.id},'${h.name}')" title="Reboot host"><i class="ti ti-power"></i></button>` : ''}
@@ -686,7 +686,7 @@ async function credentials() {
         ${creds.map(c => `<tr>
           <td><strong>${c.name}</strong></td>
           <td class="mono" style="font-size:12px">${c.ssh_user}</td>
-          <td class="mono" style="font-size:11px;color:var(--text3)">${c.fingerprint || '—'}</td>
+          <td class="mono" style="font-size:11px;color:var(--text3)">${c.fingerprint || '-'}</td>
           <td><span class="badge badge-gray">${c.host_count} host${c.host_count !== 1 ? 's' : ''}</span></td>
           <td><div class="btn-row">
             <button class="btn btn-sm btn-icon" onclick="editCredential(${c.id})" title="Edit"><i class="ti ti-pencil"></i></button>
@@ -761,7 +761,7 @@ async function deleteCredential(id, name) {
 }
 
 function _credentialOptions(selectedId) {
-  return `<option value="0"${!selectedId ? ' selected' : ''}>— manual settings —</option>` +
+  return `<option value="0"${!selectedId ? ' selected' : ''}>Manual settings</option>` +
     S.credentials.map(c =>
       `<option value="${c.id}"${c.id === selectedId ? ' selected' : ''}>${c.name} (${c.ssh_user})</option>`
     ).join('');
@@ -948,7 +948,7 @@ function rollingReboot(tag) {
   card.style.cssText = 'box-shadow:0 4px 24px rgba(0,0,0,0.18)';
   card.innerHTML = `
     <div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-      <h3><span class="dot dot-busy" style="margin-right:6px"></span>Rolling reboot — ${tag}</h3>
+      <h3><span class="dot dot-busy" style="margin-right:6px"></span>Rolling reboot: ${tag}</h3>
       <button class="btn btn-sm btn-icon" onclick="event.stopPropagation();this.closest('#${cardId}').remove()" title="Dismiss"><i class="ti ti-x"></i></button>
     </div>
     <div class="log-box" id="${logId}" style="border-radius:0;max-height:180px"></div>`;
@@ -1000,8 +1000,8 @@ async function schedule() {
     <div class="schedule-grid">
       <span style="font-weight:500">${s.name}</span>
       <span class="badge badge-gray">${s.host_ids.length === 0 ? 'All hosts' : s.host_ids.length + ' host(s)'}</span>
-      <span class="mono" style="font-size:12px;color:var(--text2)">${s.cron_expr || '—'}</span>
-      <span style="color:var(--text3);font-size:12px">${s.enabled ? (s.next_run || '—') : 'disabled'}</span>
+      <span class="mono" style="font-size:12px;color:var(--text2)">${s.cron_expr || '-'}</span>
+      <span style="color:var(--text3);font-size:12px">${s.enabled ? (s.next_run || '-') : 'disabled'}</span>
       <label class="toggle"><input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleSchedule(${s.id},this.checked)"><span class="toggle-slider"></span></label>
       <div style="display:flex;gap:4px;justify-content:flex-end">
         <button class="btn btn-sm btn-icon" onclick="editSchedule(${s.id})" title="Edit"><i class="ti ti-pencil"></i></button>
@@ -1027,7 +1027,7 @@ async function history() {
           <td>${(r.host_names||[]).join(', ') || 'All'}</td>
           <td>${r.pkg_count}</td>
           <td>${r.result === 'ok' ? `<span class="badge badge-ok"><i class="ti ti-check"></i>Success</span>` : r.result === 'error' ? `<span class="badge badge-danger"><i class="ti ti-x"></i>Error</span>` : `<span class="badge badge-warn"><i class="ti ti-alert-triangle"></i>Warning</span>`}</td>
-          <td style="color:var(--text3);font-size:12px">${r.duration_s ? r.duration_s + 's' : '—'}</td>
+          <td style="color:var(--text3);font-size:12px">${r.duration_s ? r.duration_s + 's' : '-'}</td>
           <td><button class="btn btn-sm" onclick="showLog(${r.id},'${(r.host_names||[]).join(', ')||'All'}')"><i class="ti ti-file-text"></i>Log</button></td>
         </tr>`).join('')}
       </tbody>
@@ -1083,8 +1083,8 @@ async function settings() {
         <textarea id="s-webhook-template" rows="3" style="font-family:'SF Mono',Monaco,monospace;font-size:12px;resize:vertical">${cfg.webhook_template||''}</textarea>
         <div class="form-hint">
           Leave blank for the default payload. Placeholders: <code>{host}</code> <code>{result}</code> <code>{result_upper}</code> <code>{packages}</code> <code>{duration}</code><br>
-          Ntfy: <code>{"topic":"patchkit","title":"PatchKit: {host}","message":"{result_upper} — {packages} packages"}</code><br>
-          Slack/Discord: <code>{"text":"PatchKit: {host} — {result_upper}\\n{packages} packages in {duration}s"}</code>
+          Ntfy: <code>{"topic":"patchkit","title":"PatchKit: {host}","message":"{result_upper}: {packages} packages"}</code><br>
+          Slack/Discord: <code>{"text":"PatchKit: {host}: {result_upper}\\n{packages} packages in {duration}s"}</code>
         </div>
       </div>
     </div>
@@ -1133,7 +1133,7 @@ function patchOne(id) {
 
 function patchAll() {
   const ids = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0).map(h => h.id);
-  if (ids.length === 0) { alert('Nothing to patch — all hosts are up to date.'); return; }
+  if (ids.length === 0) { alert('Nothing to patch, all hosts are up to date.'); return; }
   ids.forEach(id => S.patching.add(id));
   ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
 }
@@ -1185,7 +1185,7 @@ function showToast(msg) {
 }
 
 async function showHostHistory(id, name) {
-  document.getElementById('modal-host-history-title').textContent = `Patch history — ${name}`;
+  document.getElementById('modal-host-history-title').textContent = `Patch history: ${name}`;
   document.getElementById('modal-host-history-body').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">Loading...</div>';
   openModal('modal-host-history');
   try {
@@ -1208,7 +1208,7 @@ async function showHostHistory(id, name) {
             <td style="padding:8px 12px;font-size:12px;color:var(--text2);font-family:monospace">${r.started_at}</td>
             <td style="padding:8px 12px">${r.pkg_count}</td>
             <td style="padding:8px 12px">${r.result === 'ok' ? `<span class="badge badge-ok"><i class="ti ti-check"></i>OK</span>` : r.result === 'error' ? `<span class="badge badge-danger"><i class="ti ti-x"></i>Error</span>` : `<span class="badge badge-warn">Warn</span>`}</td>
-            <td style="padding:8px 12px;font-size:12px;color:var(--text3)">${r.duration_s ? r.duration_s+'s' : '—'}</td>
+            <td style="padding:8px 12px;font-size:12px;color:var(--text3)">${r.duration_s ? r.duration_s+'s' : '-'}</td>
             <td style="padding:8px 12px"><button class="btn btn-sm" onclick="showLog(${r.id},'${name}')"><i class="ti ti-file-text"></i>Log</button></td>
           </tr>`).join('')}
         </tbody>
