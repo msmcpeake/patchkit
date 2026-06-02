@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+patchkit.db
+patchkit_known_hosts
+patchkit.service
+data/
+.ssh/
+.git/
+.claude/

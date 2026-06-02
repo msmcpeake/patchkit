@@ -1,0 +1,11 @@
+services:
+  patchkit:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/patchkit.db:/app/patchkit.db
+      - ./data/patchkit_known_hosts:/app/patchkit_known_hosts
+      # Mount a .ssh directory if using path-based SSH keys instead of credential sets
+      # - ~/.ssh:/app/.ssh:ro
+    restart: unless-stopped
