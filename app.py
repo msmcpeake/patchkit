@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 
 CHANGELOG = [
+    {
+        "version": "1.7.5",
+        "date": "2026-06-02",
+        "changes": [
+            "Patch verification: re-scan after upgrade to detect packages skipped by the package manager (dependency conflicts, holds); report them as warnings instead of falsely claiming success",
+        ],
+    },
     {
         "version": "1.7.4",
         "date": "2026-06-02",
@@ -1214,7 +1221,36 @@ async def patch_host_stream(host_id: int):
                 yield emit(f"Upgrade command exited with code {upgrade_rc}", "error")
                 run_result = "error"
             else:
-                yield emit(f"Successfully upgraded {pkg_count} package(s)", "ok")
+                # Verify what actually installed by re-checking pending packages
+                yield emit("Verifying upgrade results...")
+                if pkg_mgr == 'apt':
+                    _, post_out, _ = await loop.run_in_executor(
+                        None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", 30, sudo_pass=sudo_pass)
+                    )
+                    post_pkgs = {p["name"] for p in parse_upgradeable(post_out)}
+                else:
+                    _, post_upd_out, _ = await loop.run_in_executor(
+                        None, lambda: ssh_run(client, "dnf check-update 2>&1; exit 0", 90, sudo_pass=sudo_pass)
+                    )
+                    _, post_inst_out, _ = await loop.run_in_executor(
+                        None, lambda: ssh_run(client,
+                            "rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null", 30, sudo_pass=sudo_pass)
+                    )
+                    post_pkgs = {p["name"] for p in parse_dnf_upgradeable(post_upd_out, post_inst_out)}
+
+                pre_names = {p["name"] for p in pkgs}
+                actually_upgraded = pre_names - post_pkgs
+                still_pending = pre_names & post_pkgs
+                pkg_count = len(actually_upgraded)
+
+                if actually_upgraded:
+                    yield emit(f"Successfully upgraded {pkg_count} package(s)", "ok")
+                if still_pending:
+                    for name in sorted(still_pending):
+                        yield emit(f"  {name}: skipped by package manager (dependency conflict or hold)", "warn")
+                    run_result = "warn"
+                if not actually_upgraded and not still_pending:
+                    yield emit("Nothing was upgraded (already up to date)", "ok")
 
                 yield emit("Checking for unneeded packages (autoremove)...")
                 async for line, lv in _stream_cmd(client, autoremove_cmd, 120, classify, sudo_pass=sudo_pass):
