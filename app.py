@@ -30,9 +30,10 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-DB_PATH = Path("patchkit.db")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))
+DB_PATH = DATA_DIR / "patchkit.db"
 LOCK_DIR = Path("/tmp")
-KNOWN_HOSTS = Path("patchkit_known_hosts")
+KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
 APP_VERSION = "1.7.1"

@@ -12,8 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY static/ static/
 
+ENV DATA_DIR=/app/data
+
 RUN useradd --uid 1000 --home-dir /app --shell /usr/sbin/nologin patchkit \
-    && mkdir -p /app/.ssh \
+    && mkdir -p /app/data \
     && chown -R patchkit:patchkit /app
 
 USER patchkit
