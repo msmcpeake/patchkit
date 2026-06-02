@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 
 CHANGELOG = [
+    {
+        "version": "1.7.6",
+        "date": "2026-06-02",
+        "changes": [
+            "Fix: log modal no longer opens behind the host history modal",
+        ],
+    },
     {
         "version": "1.7.5",
         "date": "2026-06-02",

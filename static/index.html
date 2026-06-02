@@ -470,7 +470,8 @@ function closeMobileSidebar() {
 }
 
 // Modal helpers
-function openModal(id) { document.getElementById(id).classList.add('open'); }
+let _modalZ = 50;
+function openModal(id) { const el = document.getElementById(id); el.style.zIndex = ++_modalZ; el.classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
 // Load hosts
