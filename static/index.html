@@ -98,6 +98,7 @@ tr:hover td{background:var(--bg)}
 .pkg-item{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;gap:12px}
 .pkg-item:last-child{border-bottom:none}
 .pkg-item-security{background:color-mix(in srgb,var(--red-bg) 40%,transparent)}
+.pkg-badge-phased{flex-shrink:0;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:var(--blue-bg);color:var(--blue);letter-spacing:.03em}
 .pkg-name{font-family:'SF Mono',Monaco,monospace;font-weight:500;color:var(--text)}
 .pkg-ver{font-family:'SF Mono',Monaco,monospace;color:var(--text3);font-size:11px;flex-shrink:0}
 .arrow{color:var(--text3);margin:0 5px}
@@ -820,6 +821,7 @@ async function updates() {
             <div style="display:flex;align-items:center;gap:6px;min-width:0">
               ${p.is_security ? '<span style="flex-shrink:0;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:var(--red-bg);color:var(--red);letter-spacing:.03em">SEC</span>' : '<span style="flex-shrink:0;width:29px"></span>'}
               <span class="pkg-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</span>
+              ${p.phased_pct != null ? `<span class="pkg-badge-phased" title="Ubuntu phased update - only ${p.phased_pct}% of machines receive this update so far">PHASED ${p.phased_pct}%</span>` : ''}
             </div>
             <span class="pkg-ver">${p.from}<span class="arrow">→</span><span class="ver-new">${p.to}</span></span>
           </div>`).join('')}

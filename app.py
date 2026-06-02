@@ -569,8 +569,33 @@ def parse_upgradeable(raw: str) -> list[dict]:
                 "to":   m.group(3),
                 "from": m.group(4),
                 "is_security": "security" in m.group(2).lower(),
+                "phased_pct": None,
             })
     return pkgs
+
+
+def annotate_phased(pkgs: list[dict], policy_raw: str) -> None:
+    """Parse `apt-cache policy` output and set phased_pct on matching packages."""
+    current_pkg = None
+    candidate = None
+    for line in policy_raw.splitlines():
+        m = re.match(r'^(\S+):$', line)
+        if m:
+            current_pkg = m.group(1)
+            candidate = None
+            continue
+        if current_pkg is None:
+            continue
+        mc = re.match(r'^\s+Candidate:\s+(\S+)', line)
+        if mc:
+            candidate = mc.group(1)
+            continue
+        if candidate:
+            mv = re.match(r'^\s+\S+\s+\d+\s+\(phased (\d+)%\)', line)
+            if mv:
+                for p in pkgs:
+                    if p["name"] == current_pkg and p["to"] == candidate:
+                        p["phased_pct"] = int(mv.group(1))
 
 
 def parse_dnf_security_pkgnames(out: str) -> set[str]:
@@ -940,6 +965,12 @@ async def scan_host_async(host_id: int) -> dict:
                         None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", timeout=30, sudo_pass=sudo_pass)
                     )
                     pkgs = parse_upgradeable(out)
+                    if pkgs:
+                        names = [p["name"] for p in pkgs]
+                        _, pol_out, _ = await loop.run_in_executor(
+                            None, lambda: ssh_run(client, f"apt-cache policy {' '.join(shlex.quote(n) for n in names)} 2>/dev/null", timeout=30, sudo_pass=sudo_pass)
+                        )
+                        annotate_phased(pkgs, pol_out)
                     reboot = await loop.run_in_executor(None, lambda: check_reboot_required(client, sudo_pass))
                 else:  # dnf
                     _, upd_out, _ = await loop.run_in_executor(
