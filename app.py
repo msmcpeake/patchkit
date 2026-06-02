@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.7.4"
 
 CHANGELOG = [
+    {
+        "version": "1.7.4",
+        "date": "2026-06-02",
+        "changes": [
+            "Scan all button added to hosts page toolbar",
+        ],
+    },
     {
         "version": "1.7.3",
         "date": "2026-06-02",

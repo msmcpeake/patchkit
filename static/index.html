@@ -641,6 +641,7 @@ async function hosts() {
     <h2>Hosts</h2>
     <div class="btn-row">
       <div class="search"><i class="ti ti-search"></i><input type="text" placeholder="Filter by name, IP, tag..." oninput="filterHosts(this.value)" id="host-search"></div>
+      <button class="btn" onclick="scanAll()"><i class="ti ti-refresh"></i>Scan all</button>
       <button class="btn" onclick="openBulkImportModal()"><i class="ti ti-file-import"></i>Bulk import</button>
       <button class="btn btn-primary" onclick="openAddHostModal()"><i class="ti ti-plus"></i>Add host</button>
     </div>
