@@ -202,6 +202,10 @@ tr:hover td{background:var(--bg)}
       <div class="form-row"><label>SSH port</label><input id="ah-port" value="22" type="number"></div>
     </div>
     <div class="form-row"><label>SSH key path</label><input id="ah-key" value="~/.ssh/id_ed25519"></div>
+    <div class="form-row"><label>Sudo password <span style="color:var(--text3);font-weight:400">(optional — used when SSH user is not root)</span></label>
+      <input type="password" id="ah-sudo-pass" placeholder="Leave blank for NOPASSWD sudo">
+      <div class="form-hint">Empty = NOPASSWD. Set if your sudoers requires a password. Per-host overrides the global default.</div>
+    </div>
     <div class="form-grid">
       <div class="form-row"><label>OS <span style="color:var(--text3);font-weight:400">(auto-detected on scan)</span></label>
         <div style="display:flex;gap:6px">
@@ -225,6 +229,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row"><label>Excluded packages</label><input id="ah-excluded" placeholder="linux-image-amd64, nodejs">
       <div class="form-hint">Packages held during upgrades (comma-separated)</div>
     </div>
+    <div class="form-row"><label>Notes <span style="color:var(--text3);font-weight:400">(optional)</span></label><textarea id="ah-notes" rows="2" placeholder="Optional notes about this host" style="resize:vertical"></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('modal-add-host')">Cancel</button>
       <button class="btn btn-primary" onclick="saveHost()"><i class="ti ti-plus"></i>Add host</button>
@@ -244,6 +249,10 @@ tr:hover td{background:var(--bg)}
       <div class="form-row"><label>SSH port</label><input id="eh-port" type="number"></div>
     </div>
     <div class="form-row"><label>SSH key path</label><input id="eh-key"></div>
+    <div class="form-row"><label>Sudo password <span style="color:var(--text3);font-weight:400">(optional)</span></label>
+      <input type="password" id="eh-sudo-pass" placeholder="Leave blank to keep existing">
+      <div class="form-hint">Empty = keep existing. Set to change. Per-host overrides the global default.</div>
+    </div>
     <div class="form-grid">
       <div class="form-row"><label>OS</label>
         <div style="display:flex;gap:6px">
@@ -257,6 +266,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row"><label>Excluded packages</label><input id="eh-excluded" placeholder="linux-image-amd64, nodejs">
       <div class="form-hint">Packages held during upgrades (comma-separated)</div>
     </div>
+    <div class="form-row"><label>Notes <span style="color:var(--text3);font-weight:400">(optional)</span></label><textarea id="eh-notes" rows="2" style="resize:vertical"></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('modal-edit-host')">Cancel</button>
       <button class="btn btn-primary" onclick="updateHost()"><i class="ti ti-device-floppy"></i>Save changes</button>
@@ -412,6 +422,7 @@ function afterRender() {
     const box = document.getElementById('log-' + id);
     if (box) box.scrollTop = box.scrollHeight;
   });
+  if (S.page === 'updates' && _updatesFilter) filterUpdatePkgs(_updatesFilter);
 }
 
 // --- Status helpers ---
@@ -488,7 +499,7 @@ async function dashboard() {
     </div>
   </div>
   ${totalSec > 0 ? `<div class="alert alert-warn" style="cursor:pointer" onclick="nav('updates')"><i class="ti ti-shield-exclamation"></i><span><strong>${totalSec} security update${totalSec>1?'s':''}</strong> pending across ${hs.filter(h=>(h.scan?.packages||[]).some(p=>p.is_security)).length} host${hs.filter(h=>(h.scan?.packages||[]).some(p=>p.is_security)).length>1?'s':''} — click to view</span></div>` : ''}
-  ${reboots > 0 ? `<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><span>${reboots} host${reboots>1?'s':''} pending reboot after kernel update</span></div>` : ''}
+  ${reboots > 0 ? `<div class="alert alert-warn" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:8px"><i class="ti ti-alert-triangle"></i><span>${reboots} host${reboots>1?'s':''} pending reboot after kernel update</span></div><button class="btn btn-sm btn-amber" onclick="rebootAll()"><i class="ti ti-power"></i>Reboot all</button></div>` : ''}
   ${diskWarn > 0 ? `<div class="alert alert-warn"><i class="ti ti-database-exclamation"></i><span>${diskWarn} host${diskWarn>1?'s':''} with disk usage ≥ 85%</span></div>` : ''}
   <div class="metrics">
     <div class="metric"><div class="metric-label">Hosts</div><div class="metric-value">${hs.length}</div></div>
@@ -507,6 +518,7 @@ async function dashboard() {
             <div style="display:flex;align-items:center;gap:7px"><span class="dot ${dotClass(h)}"></span><strong>${h.name}</strong>${rebootTag(h)}</div>
             <div class="mono" style="font-size:11px;color:var(--text3);margin-top:1px;padding-left:14px">${h.ip}</div>
             <div style="padding-left:14px;margin-top:2px">${tagBadges(h)}</div>
+            ${h.notes ? `<div style="font-size:11px;color:var(--text2);font-style:italic;padding-left:14px;margin-top:2px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h.notes}">${h.notes}</div>` : ''}
           </td>
           <td style="color:var(--text2)">${h.role||'—'}</td>
           <td>${statusBadge(h)}</td>
@@ -551,9 +563,10 @@ function hostsRows(hs) {
     <td>
       <div style="display:flex;align-items:center;gap:7px"><span class="dot ${dotClass(h)}"></span><strong>${h.name}</strong>${rebootTag(h)}</div>
       <div class="mono" style="font-size:11px;color:var(--text3);padding-left:14px">${h.role||''}</div>
+      ${h.notes ? `<div style="font-size:11px;color:var(--text2);font-style:italic;padding-left:14px;margin-top:1px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h.notes}">${h.notes}</div>` : ''}
     </td>
     <td class="mono" style="font-size:12px;color:var(--text2)">${h.ip}:${h.port}</td>
-    <td><span class="badge badge-gray">${h.os_name}</span></td>
+    <td><span class="badge badge-gray">${h.os_name}</span>${h.ssh_user && h.ssh_user !== 'root' ? ` <span class="badge badge-gray" title="Connects as ${h.ssh_user}, uses sudo for privileged commands"><i class="ti ti-terminal"></i>sudo</span>` : ''}</td>
     <td>${tagBadges(h)}</td>
     <td>${statusBadge(h)}</td>
     <td>${diskBar(h)}</td>
@@ -584,6 +597,7 @@ function filterHosts(q) {
 
 // --- Updates page ---
 let _updatesSecOnly = false;
+let _updatesFilter = '';
 
 async function updates() {
   const needPatch = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0);
@@ -592,6 +606,7 @@ async function updates() {
   <div class="topbar">
     <h2>Updates</h2>
     <div class="btn-row">
+      <div class="search"><i class="ti ti-search"></i><input type="text" placeholder="Filter packages..." oninput="filterUpdatePkgs(this.value)" id="updates-pkg-filter" value="${_updatesFilter}"></div>
       <button class="btn" onclick="scanAll()"><i class="ti ti-refresh"></i>Refresh all</button>
       ${totalSec > 0 ? `<button class="btn ${_updatesSecOnly?'btn-primary':''}" onclick="_updatesSecOnly=!_updatesSecOnly;render()" title="Show security updates only">
         <i class="ti ti-shield-exclamation"></i>${_updatesSecOnly?'All updates':'Security only'}</button>` : ''}
@@ -856,6 +871,10 @@ async function settings() {
         <div class="form-row"><label>Key path</label><input id="s-ssh-key" value="${cfg.ssh_key||'~/.ssh/id_ed25519'}"></div>
         <div class="form-row"><label>Connect timeout (s)</label><input id="s-ssh-timeout" value="${cfg.ssh_timeout||'10'}" type="number"></div>
       </div>
+      <div class="form-row"><label>Default sudo password <span style="color:var(--text3);font-weight:400">(optional)</span></label>
+        <input type="password" id="s-sudo-pass" placeholder="Leave blank for NOPASSWD sudo" value="${cfg.sudo_pass||''}">
+        <div class="form-hint">Used when SSH user is not root. Per-host sudo password takes precedence over this global default.</div>
+      </div>
     </div>
     <div class="settings-section">
       <h4>Scanning</h4>
@@ -867,6 +886,7 @@ async function settings() {
         </select>
       </div>
       <div class="setting-row"><span>Auto-apply security updates</span><label class="toggle"><input id="s-auto-sec" type="checkbox" ${cfg.auto_security==='1'?'checked':''}><span class="toggle-slider"></span></label></div>
+      <div class="setting-row"><span>Scan before patch</span><label class="toggle"><input id="s-scan-before-patch" type="checkbox" ${cfg.scan_before_patch==='1'?'checked':''}><span class="toggle-slider"></span></label></div>
     </div>
     <div class="settings-section">
       <h4>Notifications</h4>
@@ -946,6 +966,30 @@ async function rebootHost(id, name) {
     await api('POST', `/hosts/${id}/reboot`);
     showToast(`Reboot command sent to ${name}`);
   } catch(e) { alert('Reboot failed: ' + e.message); }
+}
+
+async function rebootAll() {
+  const need = S.hosts.filter(h => h.scan && h.scan.reboot_req);
+  if (!need.length) return;
+  const names = need.map(h => h.name).join(', ');
+  if (!confirm(`Reboot ${need.length} host${need.length>1?'s':''} pending a kernel update?\n\n${names}`)) return;
+  await Promise.all(need.map(h => api('POST', `/hosts/${h.id}/reboot`).catch(() => {})));
+  showToast(`Reboot commands sent to ${need.length} host${need.length>1?'s':''}`);
+}
+
+function filterUpdatePkgs(q) {
+  _updatesFilter = q.toLowerCase();
+  document.querySelectorAll('.pkg-list').forEach(list => {
+    let visible = 0;
+    list.querySelectorAll('.pkg-item').forEach(item => {
+      const name = (item.querySelector('.pkg-name')?.textContent || '').toLowerCase();
+      const show = !_updatesFilter || name.includes(_updatesFilter);
+      item.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    const card = list.closest('.card');
+    if (card) card.style.display = visible > 0 ? '' : 'none';
+  });
 }
 
 function showToast(msg) {
@@ -1146,6 +1190,8 @@ async function saveHost() {
     role: document.getElementById('ah-role').value.trim(),
     tags: document.getElementById('ah-tags').value.trim(),
     excluded_pkgs: document.getElementById('ah-excluded').value.trim(),
+    notes: document.getElementById('ah-notes').value.trim(),
+    sudo_pass: document.getElementById('ah-sudo-pass').value,
   };
   if (!body.name || !body.ip) { alert('Name and IP are required'); return; }
   try {
@@ -1167,6 +1213,7 @@ function editHost(id) {
   document.getElementById('eh-role').value = h.role || '';
   document.getElementById('eh-tags').value = h.tags || '';
   document.getElementById('eh-excluded').value = h.excluded_pkgs || '';
+  document.getElementById('eh-notes').value = h.notes || '';
   document.getElementById('eh-os').value = h.os_name || '';
   openModal('modal-edit-host');
 }
@@ -1183,8 +1230,12 @@ async function updateHost() {
     role:         document.getElementById('eh-role').value.trim(),
     tags:         document.getElementById('eh-tags').value.trim(),
     excluded_pkgs: document.getElementById('eh-excluded').value.trim(),
+    notes:        document.getElementById('eh-notes').value.trim(),
+    sudo_pass:    document.getElementById('eh-sudo-pass').value,
   };
   if (!body.name || !body.ip) { alert('Name and IP are required'); return; }
+  // Don't send sudo_pass if left blank — backend skips empty strings to preserve existing
+  if (body.sudo_pass === '') delete body.sudo_pass;
   try {
     await api('PATCH', `/hosts/${id}`, body);
     closeModal('modal-edit-host');
@@ -1234,6 +1285,8 @@ async function saveSettings() {
     ssh_timeout: document.getElementById('s-ssh-timeout').value,
     scan_interval_hours: document.getElementById('s-scan-interval').value,
     auto_security: document.getElementById('s-auto-sec').checked ? '1' : '0',
+    scan_before_patch: document.getElementById('s-scan-before-patch').checked ? '1' : '0',
+    sudo_pass: document.getElementById('s-sudo-pass').value,
     smtp_relay: document.getElementById('s-smtp').value,
     notify_email: document.getElementById('s-email').value,
     webhook_url: document.getElementById('s-webhook-url').value,

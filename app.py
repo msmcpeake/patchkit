@@ -32,9 +32,28 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = Path("patchkit_known_hosts")
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.6.1"
 
 CHANGELOG = [
+    {
+        "version": "1.6.1",
+        "date": "2026-06-02",
+        "changes": [
+            "Sudo elevation: non-root SSH users now run privileged commands via sudo automatically",
+            "Per-host and global sudo password support (NOPASSWD or explicit password)",
+            "Sudo wraps complex compound commands safely via sudo sh -c to avoid shell-quoting issues",
+        ],
+    },
+    {
+        "version": "1.6.0",
+        "date": "2026-06-02",
+        "changes": [
+            "Batch reboot: reboot all hosts pending a kernel update from the dashboard alert banner",
+            "Scan before patch: optional setting to run a fresh scan immediately before applying updates",
+            "Host notes: free-text notes field per host, shown in the host list",
+            "Updates page: live package-name filter across all hosts",
+        ],
+    },
     {
         "version": "1.5.3",
         "date": "2026-06-02",
@@ -259,6 +278,8 @@ def init_db():
         INSERT OR IGNORE INTO settings VALUES ('auth_header', '');
         INSERT OR IGNORE INTO settings VALUES ('auto_security', '0');
         INSERT OR IGNORE INTO settings VALUES ('require_reboot_confirm', '1');
+        INSERT OR IGNORE INTO settings VALUES ('scan_before_patch', '0');
+        INSERT OR IGNORE INTO settings VALUES ('sudo_pass', '');
         """)
         conn.commit()
 
@@ -271,6 +292,8 @@ def _migrate_db():
         "ALTER TABLE scan_results ADD COLUMN uptime_str TEXT DEFAULT ''",
         "ALTER TABLE hosts ADD COLUMN tags TEXT DEFAULT ''",
         "ALTER TABLE hosts ADD COLUMN excluded_pkgs TEXT DEFAULT ''",
+        "ALTER TABLE hosts ADD COLUMN notes TEXT DEFAULT ''",
+        "ALTER TABLE hosts ADD COLUMN sudo_pass TEXT DEFAULT ''",
     ]
     db = get_db()
     for sql in migrations:
@@ -300,6 +323,8 @@ class HostCreate(BaseModel):
     role: str = ""
     tags: str = ""
     excluded_pkgs: str = ""
+    notes: str = ""
+    sudo_pass: str = ""
 
 class TempHostSpec(BaseModel):
     ip: str
@@ -317,6 +342,8 @@ class HostUpdate(BaseModel):
     role: Optional[str] = None
     tags: Optional[str] = None
     excluded_pkgs: Optional[str] = None
+    notes: Optional[str] = None
+    sudo_pass: Optional[str] = None
     enabled: Optional[int] = None
 
 class SettingsPayload(BaseModel):
@@ -393,8 +420,38 @@ async def ssh_connect_async(host: sqlite3.Row, max_attempts: int = 3) -> paramik
     raise last_exc
 
 
-def ssh_run(client: paramiko.SSHClient, cmd: str, timeout: int = 120) -> tuple[int, str, str]:
-    _, stdout, stderr = client.exec_command(cmd, timeout=timeout, get_pty=False)
+def _resolve_sudo_pass(host, defaults: dict) -> Optional[str]:
+    """Return the sudo password for this host, or None if sudo is not needed.
+
+    Returns None when ssh_user is 'root' (no sudo).
+    Returns '' for NOPASSWD sudo, or the password string when one is configured.
+    Per-host sudo_pass takes precedence over the global setting.
+    """
+    user = (host["ssh_user"] or defaults.get("ssh_user", "root")).strip()
+    if user == "root":
+        return None
+    try:
+        host_pass = (host["sudo_pass"] or "").strip()
+    except (KeyError, IndexError):
+        host_pass = ""
+    global_pass = defaults.get("sudo_pass", "").strip()
+    return host_pass if host_pass else global_pass
+
+
+def ssh_run(client: paramiko.SSHClient, cmd: str, timeout: int = 120,
+            sudo_pass: Optional[str] = None) -> tuple[int, str, str]:
+    """Run cmd over SSH. sudo_pass=None=no sudo, ''=NOPASSWD, 'pass'=password sudo."""
+    if sudo_pass is not None:
+        # Wrap in sh -c so compound commands (if/else, pipes, semicolons) work correctly.
+        if sudo_pass:
+            cmd = f"sudo -S -p '' sh -c {shlex.quote(cmd)}"
+        else:
+            cmd = f"sudo sh -c {shlex.quote(cmd)}"
+    stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout, get_pty=False)
+    if sudo_pass:
+        stdin.write(f"{sudo_pass}\n")
+        stdin.flush()
+        stdin.channel.shutdown_write()
     out = stdout.read().decode(errors="replace")
     err = stderr.read().decode(errors="replace")
     rc = stdout.channel.recv_exit_status()
@@ -439,8 +496,8 @@ def parse_dnf_security_pkgnames(out: str) -> set[str]:
     return names
 
 
-def check_reboot_required(client: paramiko.SSHClient) -> bool:
-    rc, out, _ = ssh_run(client, "test -f /var/run/reboot-required && echo yes || echo no", timeout=10)
+def check_reboot_required(client: paramiko.SSHClient, sudo_pass: Optional[str] = None) -> bool:
+    rc, out, _ = ssh_run(client, "test -f /var/run/reboot-required && echo yes || echo no", timeout=10, sudo_pass=sudo_pass)
     return "yes" in out
 
 
@@ -553,7 +610,7 @@ def parse_dnf_upgradeable(upd_raw: str, inst_raw: str) -> list[dict]:
     return pkgs
 
 
-def check_reboot_required_dnf(client: paramiko.SSHClient) -> bool:
+def check_reboot_required_dnf(client: paramiko.SSHClient, sudo_pass: Optional[str] = None) -> bool:
     """Check reboot-required on Fedora/RHEL: tries needs-restarting, falls back to kernel compare."""
     rc, out, _ = ssh_run(
         client,
@@ -565,6 +622,7 @@ def check_reboot_required_dnf(client: paramiko.SSHClient) -> bool:
         "  [ \"$RUNNING\" = \"$LATEST\" ] && echo no || echo yes; "
         "fi",
         timeout=15,
+        sudo_pass=sudo_pass,
     )
     return "yes" in out
 
@@ -595,10 +653,18 @@ def _classify_dnf_line(line: str) -> str:
     return "info"
 
 
-async def _stream_cmd(client: paramiko.SSHClient, cmd: str, timeout: int, classify):
+async def _stream_cmd(client: paramiko.SSHClient, cmd: str, timeout: int, classify,
+                      sudo_pass: Optional[str] = None):
     """Async generator: yields (line, level) pairs then a final ("__EXIT__", rc_str) sentinel."""
+    if sudo_pass is not None:
+        if sudo_pass:
+            cmd = f"sudo -S -p '' sh -c {shlex.quote(cmd)}"
+        else:
+            cmd = f"sudo sh -c {shlex.quote(cmd)}"
     _, stdout, _ = client.exec_command(cmd, timeout=timeout, get_pty=True)
     channel = stdout.channel
+    if sudo_pass:
+        channel.sendall(f"{sudo_pass}\n".encode())
     buf = b""
     while True:
         chunk = await asyncio.get_event_loop().run_in_executor(None, lambda: channel.recv(4096))
@@ -747,6 +813,8 @@ async def scan_host_async(host_id: int) -> dict:
         if not row:
             db.close()
             raise HTTPException(404, "Host not found")
+        defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+        sudo_pass = _resolve_sudo_pass(row, defaults)
 
         result: dict = {
             "host_id": host_id, "host_name": row["name"],
@@ -770,25 +838,26 @@ async def scan_host_async(host_id: int) -> dict:
 
                 if pkg_mgr == 'apt':
                     await loop.run_in_executor(
-                        None, lambda: ssh_run(client, "apt-get update -qq 2>&1", timeout=60)
+                        None, lambda: ssh_run(client, "apt-get update -qq 2>&1", timeout=60, sudo_pass=sudo_pass)
                     )
                     _, out, _ = await loop.run_in_executor(
-                        None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", timeout=30)
+                        None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", timeout=30, sudo_pass=sudo_pass)
                     )
                     pkgs = parse_upgradeable(out)
-                    reboot = await loop.run_in_executor(None, lambda: check_reboot_required(client))
+                    reboot = await loop.run_in_executor(None, lambda: check_reboot_required(client, sudo_pass))
                 else:  # dnf
                     _, upd_out, _ = await loop.run_in_executor(
-                        None, lambda: ssh_run(client, "dnf check-update 2>&1; exit 0", timeout=90)
+                        None, lambda: ssh_run(client, "dnf check-update 2>&1; exit 0", timeout=90, sudo_pass=sudo_pass)
                     )
                     _, inst_out, _ = await loop.run_in_executor(
                         None, lambda: ssh_run(client,
-                            "rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null", timeout=30)
+                            "rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null", timeout=30, sudo_pass=sudo_pass)
                     )
                     pkgs = parse_dnf_upgradeable(upd_out, inst_out)
                     _, sec_out, _ = await loop.run_in_executor(
                         None, lambda: ssh_run(client,
-                            "dnf updateinfo list security --quiet 2>&1; exit 0", timeout=30)
+                            "dnf updateinfo list security --quiet 2>&1; exit 0", timeout=30,
+                            sudo_pass=sudo_pass)
                     )
                     sec_names = parse_dnf_security_pkgnames(sec_out)
                     # Detect when the distro has no advisory system (e.g. Nobara, vanilla Fedora).
@@ -802,17 +871,17 @@ async def scan_host_async(host_id: int) -> dict:
                     if not no_advisory_data:
                         for p in pkgs:
                             p["is_security"] = p["name"] in sec_names
-                    reboot = await loop.run_in_executor(None, lambda: check_reboot_required_dnf(client))
+                    reboot = await loop.run_in_executor(None, lambda: check_reboot_required_dnf(client, sudo_pass))
 
                 _, disk_out, _ = await loop.run_in_executor(
-                    None, lambda: ssh_run(client, "df -h / 2>/dev/null | tail -1 | awk '{print $5, $4}'", timeout=10)
+                    None, lambda: ssh_run(client, "df -h / 2>/dev/null | tail -1 | awk '{print $5, $4}'", timeout=10, sudo_pass=sudo_pass)
                 )
                 disk_parts = disk_out.strip().split()
                 disk_used_pct = disk_parts[0] if disk_parts else ""
                 disk_free     = disk_parts[1] if len(disk_parts) > 1 else ""
 
                 _, up_out, _ = await loop.run_in_executor(
-                    None, lambda: ssh_run(client, "uptime -p 2>/dev/null || uptime", timeout=10)
+                    None, lambda: ssh_run(client, "uptime -p 2>/dev/null || uptime", timeout=10, sudo_pass=sudo_pass)
                 )
                 uptime_str = up_out.strip().splitlines()[0] if up_out.strip() else ""
 
@@ -826,7 +895,7 @@ async def scan_host_async(host_id: int) -> dict:
             finally:
                 client.close()
         except Exception as e:
-            result["error"] = str(e)
+            result["error"] = str(e) or type(e).__name__
 
         db.execute(
             """INSERT INTO scan_results
@@ -863,6 +932,8 @@ async def patch_host_stream(host_id: int):
         yield "data: DONE\n\n"
         return
 
+    defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+    sudo_pass = _resolve_sudo_pass(row, defaults)
     excluded = [p.strip() for p in (row["excluded_pkgs"] or "").split(",") if p.strip()]
     host_name = row["name"]
     t0 = time.time()
@@ -882,6 +953,14 @@ async def patch_host_stream(host_id: int):
         log_lines.append(line)
         return f"data: {level}|{line}\n\n"
 
+    if defaults.get("scan_before_patch") == "1":
+        yield emit("Pre-scan: refreshing package list...")
+        try:
+            await scan_host_async(host_id)
+            yield emit("Pre-scan complete", "ok")
+        except Exception as e:
+            yield emit(f"Pre-scan failed (continuing): {e}", "warn")
+
     yield emit(f"Connecting to {host_name} ({row['ip']})...")
 
     try:
@@ -893,7 +972,8 @@ async def patch_host_stream(host_id: int):
         # Auto-detect OS and package manager
         os_detected, pkg_mgr = await loop.run_in_executor(None, lambda: detect_os(client))
         classify = _classify_apt_line if pkg_mgr == 'apt' else _classify_dnf_line
-        yield emit(f"Detected OS: {os_detected} → using {pkg_mgr}", "info")
+        sudo_label = "" if sudo_pass is None else (" (NOPASSWD sudo)" if not sudo_pass else " (sudo with password)")
+        yield emit(f"Detected OS: {os_detected} → using {pkg_mgr}{sudo_label}", "info")
 
         # Persist if changed
         if os_detected not in ("Unknown", "") and os_detected != row["os_name"]:
@@ -908,10 +988,10 @@ async def patch_host_stream(host_id: int):
             if excluded:
                 yield emit(f"Holding excluded packages: {', '.join(excluded)}")
                 await loop.run_in_executor(
-                    None, lambda: ssh_run(client, f"apt-mark hold {' '.join(shlex.quote(p) for p in excluded)} 2>&1", timeout=30)
+                    None, lambda: ssh_run(client, f"apt-mark hold {' '.join(shlex.quote(p) for p in excluded)} 2>&1", timeout=30, sudo_pass=sudo_pass)
                 )
             rc, _, err = await loop.run_in_executor(
-                None, lambda: ssh_run(client, "DEBIAN_FRONTEND=noninteractive apt-get update -q 2>&1", 60)
+                None, lambda: ssh_run(client, "DEBIAN_FRONTEND=noninteractive apt-get update -q 2>&1", 60, sudo_pass=sudo_pass)
             )
             if rc != 0:
                 yield emit(f"apt-get update warning: {err.strip()}", "warn")
@@ -919,17 +999,17 @@ async def patch_host_stream(host_id: int):
             else:
                 yield emit("Package lists updated", "ok")
             _, out, _ = await loop.run_in_executor(
-                None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", 30)
+                None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", 30, sudo_pass=sudo_pass)
             )
             pkgs = parse_upgradeable(out)
         else:  # dnf — check-update refreshes metadata and lists in one shot
             yield emit("Running dnf check-update...")
             _, upd_out, _ = await loop.run_in_executor(
-                None, lambda: ssh_run(client, "dnf check-update 2>&1; exit 0", 90)
+                None, lambda: ssh_run(client, "dnf check-update 2>&1; exit 0", 90, sudo_pass=sudo_pass)
             )
             _, inst_out, _ = await loop.run_in_executor(
                 None, lambda: ssh_run(client,
-                    "rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null", 30)
+                    "rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null", 30, sudo_pass=sudo_pass)
             )
             pkgs = parse_dnf_upgradeable(upd_out, inst_out)
 
@@ -961,7 +1041,7 @@ async def patch_host_stream(host_id: int):
 
             yield emit("Applying upgrades...")
             upgrade_rc = None
-            async for line, lv in _stream_cmd(client, upgrade_cmd, 300, classify):
+            async for line, lv in _stream_cmd(client, upgrade_cmd, 300, classify, sudo_pass=sudo_pass):
                 if line == "__EXIT__":
                     upgrade_rc = int(lv)
                 else:
@@ -974,7 +1054,7 @@ async def patch_host_stream(host_id: int):
                 yield emit(f"Successfully upgraded {pkg_count} package(s)", "ok")
 
                 yield emit("Checking for unneeded packages (autoremove)...")
-                async for line, lv in _stream_cmd(client, autoremove_cmd, 120, classify):
+                async for line, lv in _stream_cmd(client, autoremove_cmd, 120, classify, sudo_pass=sudo_pass):
                     if line == "__EXIT__":
                         if int(lv) != 0:
                             yield emit(f"autoremove exited with code {lv}", "warn")
@@ -984,20 +1064,20 @@ async def patch_host_stream(host_id: int):
                         yield emit(line, lv)
 
                 yield emit("Cleaning package cache...")
-                await loop.run_in_executor(None, lambda: ssh_run(client, clean_cmd, timeout=30))
+                await loop.run_in_executor(None, lambda: ssh_run(client, clean_cmd, timeout=30, sudo_pass=sudo_pass))
                 yield emit("Package cache cleaned", "ok")
 
         # ── Post-upgrade cleanup ──────────────────────────────────────────
         if pkg_mgr == 'apt' and excluded:
             await loop.run_in_executor(
-                None, lambda: ssh_run(client, f"apt-mark unhold {' '.join(shlex.quote(p) for p in excluded)} 2>&1", timeout=30)
+                None, lambda: ssh_run(client, f"apt-mark unhold {' '.join(shlex.quote(p) for p in excluded)} 2>&1", timeout=30, sudo_pass=sudo_pass)
             )
             yield emit(f"Released holds on: {', '.join(excluded)}")
 
         if pkg_mgr == 'apt':
-            reboot = await loop.run_in_executor(None, lambda: check_reboot_required(client))
+            reboot = await loop.run_in_executor(None, lambda: check_reboot_required(client, sudo_pass))
         else:
-            reboot = await loop.run_in_executor(None, lambda: check_reboot_required_dnf(client))
+            reboot = await loop.run_in_executor(None, lambda: check_reboot_required_dnf(client, sudo_pass))
         if reboot:
             yield emit("Reboot required (kernel or libc updated)", "warn")
 
@@ -1186,6 +1266,7 @@ async def rolling_reboot_stream(tag: str, grace: int = 30):
         db = get_db()
         hosts = [dict(db.execute("SELECT * FROM hosts WHERE id=?", (hid,)).fetchone())
                  for hid in ids]
+        defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
         db.close()
 
         def emit(msg: str, level: str = "info") -> str:
@@ -1197,13 +1278,14 @@ async def rolling_reboot_stream(tag: str, grace: int = 30):
         for i, host in enumerate(hosts, 1):
             name = host["name"]
             ip   = host["ip"]
+            host_sudo = _resolve_sudo_pass(host, defaults)
             yield emit(f"[{i}/{len(hosts)}] Rebooting {name} ({ip})...", "info")
 
             # Send reboot
             try:
                 client = await ssh_connect_async(host, max_attempts=1)
                 await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ssh_run(client, "reboot", timeout=5)
+                    None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=host_sudo)
                 )
                 client.close()
             except Exception:
@@ -1291,10 +1373,10 @@ def add_host(body: HostCreate):
     db = get_db()
     try:
         db.execute(
-            """INSERT INTO hosts (name,ip,port,ssh_user,ssh_key,os_name,role,tags,excluded_pkgs)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO hosts (name,ip,port,ssh_user,ssh_key,os_name,role,tags,excluded_pkgs,notes,sudo_pass)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (body.name, body.ip, body.port, body.ssh_user, body.ssh_key,
-             body.os_name, body.role, body.tags, body.excluded_pkgs),
+             body.os_name, body.role, body.tags, body.excluded_pkgs, body.notes, body.sudo_pass),
         )
         db.commit()
     except sqlite3.IntegrityError:
@@ -1305,13 +1387,15 @@ def add_host(body: HostCreate):
     return {"id": hid, "name": body.name}
 
 
-_ALLOWED_HOST_COLUMNS = {"name", "ip", "port", "ssh_user", "ssh_key", "os_name", "role", "tags", "excluded_pkgs", "enabled"}
+_ALLOWED_HOST_COLUMNS = {"name", "ip", "port", "ssh_user", "ssh_key", "os_name", "role", "tags", "excluded_pkgs", "notes", "sudo_pass", "enabled"}
 
 
 @app.patch("/api/hosts/{host_id}")
 def update_host(host_id: int, body: HostUpdate):
     db = get_db()
     fields = {k: v for k, v in body.dict().items() if v is not None and k in _ALLOWED_HOST_COLUMNS}
+    # Empty sudo_pass on PATCH means "keep existing" — only update when explicitly provided
+    fields.pop("sudo_pass", None) if fields.get("sudo_pass") == "" else None
     if not fields:
         db.close()
         return {"ok": True}
@@ -1427,13 +1511,15 @@ async def scan_host(host_id: int):
 async def reboot_host(host_id: int):
     db = get_db()
     row = db.execute("SELECT * FROM hosts WHERE id=?", (host_id,)).fetchone()
+    defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
     db.close()
     if not row:
         raise HTTPException(404, "Host not found")
+    sudo_pass = _resolve_sudo_pass(row, defaults)
     try:
         client = await ssh_connect_async(row, max_attempts=1)
         await asyncio.get_event_loop().run_in_executor(
-            None, lambda: ssh_run(client, "reboot", timeout=5)
+            None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
         )
         client.close()
     except Exception:
