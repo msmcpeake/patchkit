@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.9"
+APP_VERSION = "1.8.0"
 
 CHANGELOG = [
+    {
+        "version": "1.8.0",
+        "date": "2026-06-03",
+        "changes": [
+            "Single host reboot and reboot all now open a live monitoring card showing offline/recovery/rescan progress, same as rolling reboot",
+        ],
+    },
     {
         "version": "1.7.9",
         "date": "2026-06-03",
@@ -1924,6 +1931,80 @@ async def detect_host_os(host_id: int):
 @app.post("/api/hosts/{host_id}/scan")
 async def scan_host(host_id: int):
     return await scan_host_async(host_id)
+
+
+@app.get("/api/hosts/{host_id}/reboot")
+async def reboot_host_stream(host_id: int):
+    """SSE stream: send reboot, wait for host to go down and come back, then rescan."""
+    async def stream():
+        db = get_db()
+        row = db.execute("SELECT * FROM hosts WHERE id=?", (host_id,)).fetchone()
+        defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+        db.close()
+        if not row:
+            yield "data: error|Host not found\n\ndata: DONE\n\n"
+            return
+
+        ip   = row["ip"]
+        port = int(row["port"] or 22)
+        sudo_pass = _resolve_sudo_pass(row, defaults)
+
+        def emit(msg: str, level: str = "info") -> str:
+            ts = datetime.now().strftime("%H:%M:%S")
+            return f"data: {level}|[{ts}] {msg}\n\n"
+
+        yield emit(f"Sending reboot command to {row['name']} ({ip})...")
+        try:
+            client = await ssh_connect_async(row, max_attempts=1)
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
+            )
+            client.close()
+        except Exception:
+            pass  # connection drop on reboot is expected
+
+        yield emit("Waiting for host to go offline...")
+        deadline = asyncio.get_event_loop().time() + 120
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(5)
+            try:
+                r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=3)
+                w.close()
+                await w.wait_closed()
+            except Exception:
+                break
+
+        yield emit("Host is offline, waiting for recovery...", "warn")
+        deadline = asyncio.get_event_loop().time() + 300
+        recovered = False
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(10)
+            try:
+                r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=5)
+                w.close()
+                await w.wait_closed()
+                recovered = True
+                break
+            except Exception:
+                continue
+
+        if not recovered:
+            yield emit("Host did not come back within 5 minutes", "error")
+            yield "data: DONE\n\n"
+            return
+
+        yield emit("Host is back online, rescanning...", "ok")
+        await asyncio.sleep(10)
+        try:
+            await scan_host_async(host_id)
+            yield emit("Rescan complete — reboot flag cleared", "ok")
+        except Exception as e:
+            yield emit(f"Rescan failed: {e}", "warn")
+
+        yield "data: DONE\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/hosts/{host_id}/reboot")

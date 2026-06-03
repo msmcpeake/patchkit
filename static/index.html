@@ -1200,12 +1200,53 @@ function patchAll() {
   hosts.forEach(h => streamPatch(`/api/hosts/${h.id}/patch`, h.id));
 }
 
+function streamReboot(hostId, hostName) {
+  let modal = document.getElementById('patch-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'patch-modal';
+    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 48px);overflow-y:auto';
+    document.body.appendChild(modal);
+  }
+  const cardId = 'reboot-card-' + hostId;
+  const logId  = 'reboot-log-' + hostId;
+  let card = document.getElementById(cardId);
+  if (card) card.remove();
+  card = document.createElement('div');
+  card.id = cardId;
+  card.className = 'card';
+  card.style.cssText = 'box-shadow:0 4px 24px rgba(0,0,0,0.18)';
+  card.innerHTML = `
+    <div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+      <h3><span class="dot dot-busy" style="margin-right:6px"></span>Rebooting ${hostName}</h3>
+      <button class="btn btn-sm btn-icon" onclick="event.stopPropagation();this.closest('#${cardId}').remove()" title="Dismiss"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="log-box" id="${logId}" style="border-radius:0;max-height:180px"></div>`;
+  modal.appendChild(card);
+
+  const box = document.getElementById(logId);
+  const es  = new EventSource(`/api/hosts/${hostId}/reboot`);
+  es.onmessage = e => {
+    if (e.data === 'DONE') {
+      es.close();
+      const dot = card.querySelector('.dot');
+      if (dot) dot.className = 'dot dot-ok';
+      loadHosts().then(() => render());
+      return;
+    }
+    const [level, ...rest] = e.data.split('|');
+    const line = document.createElement('div');
+    line.className = 'log-' + (level || 'info');
+    line.textContent = rest.join('|');
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  };
+  es.onerror = () => { es.close(); };
+}
+
 async function rebootHost(id, name) {
   if (!confirm(`Reboot ${name} now? The host will be temporarily unreachable.`)) return;
-  try {
-    await api('POST', `/hosts/${id}/reboot`);
-    showToast(`Reboot command sent to ${name}`);
-  } catch(e) { alert('Reboot failed: ' + e.message); }
+  streamReboot(id, name);
 }
 
 async function rebootAll() {
@@ -1213,8 +1254,7 @@ async function rebootAll() {
   if (!need.length) return;
   const names = need.map(h => h.name).join(', ');
   if (!confirm(`Reboot ${need.length} host${need.length>1?'s':''} pending a kernel update?\n\n${names}`)) return;
-  await Promise.all(need.map(h => api('POST', `/hosts/${h.id}/reboot`).catch(() => {})));
-  showToast(`Reboot commands sent to ${need.length} host${need.length>1?'s':''}`);
+  need.forEach(h => streamReboot(h.id, h.name));
 }
 
 function filterUpdatePkgs(q) {
