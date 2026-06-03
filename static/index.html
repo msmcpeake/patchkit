@@ -1124,6 +1124,9 @@ async function settings() {
       </div>
       <div class="setting-row"><span>Auto-apply security updates</span><label class="toggle"><input id="s-auto-sec" type="checkbox" ${cfg.auto_security==='1'?'checked':''}><span class="toggle-slider"></span></label></div>
       <div class="setting-row"><span>Scan before patch</span><label class="toggle"><input id="s-scan-before-patch" type="checkbox" ${cfg.scan_before_patch==='1'?'checked':''}><span class="toggle-slider"></span></label></div>
+      <div class="form-row" style="margin-top:8px"><label>Reboot recovery timeout (s)</label><input id="s-reboot-timeout" value="${cfg.reboot_timeout||'300'}" type="number">
+        <div class="form-hint">How long to wait for a host to come back online after a reboot before giving up.</div>
+      </div>
     </div>
     <div class="settings-section">
       <h4>Notifications</h4>
@@ -1702,6 +1705,7 @@ async function saveSettings() {
     scan_interval_hours: document.getElementById('s-scan-interval').value,
     auto_security: document.getElementById('s-auto-sec').checked ? '1' : '0',
     scan_before_patch: document.getElementById('s-scan-before-patch').checked ? '1' : '0',
+    reboot_timeout: document.getElementById('s-reboot-timeout').value,
     sudo_pass: document.getElementById('s-sudo-pass').value,
     smtp_relay: document.getElementById('s-smtp').value,
     notify_email: document.getElementById('s-email').value,

@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 CHANGELOG = [
+    {
+        "version": "1.8.1",
+        "date": "2026-06-03",
+        "changes": [
+            "Reboot recovery timeout is now configurable in Settings (default 300s)",
+        ],
+    },
     {
         "version": "1.8.0",
         "date": "2026-06-03",
@@ -1948,6 +1955,7 @@ async def reboot_host_stream(host_id: int):
         ip   = row["ip"]
         port = int(row["port"] or 22)
         sudo_pass = _resolve_sudo_pass(row, defaults)
+        reboot_timeout = int(defaults.get("reboot_timeout", 300))
 
         def emit(msg: str, level: str = "info") -> str:
             ts = datetime.now().strftime("%H:%M:%S")
@@ -1974,8 +1982,8 @@ async def reboot_host_stream(host_id: int):
             except Exception:
                 break
 
-        yield emit("Host is offline, waiting for recovery...", "warn")
-        deadline = asyncio.get_event_loop().time() + 300
+        yield emit(f"Host is offline, waiting for recovery (timeout: {reboot_timeout}s)...", "warn")
+        deadline = asyncio.get_event_loop().time() + reboot_timeout
         recovered = False
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(10)
@@ -2025,8 +2033,8 @@ async def reboot_host(host_id: int):
     except Exception:
         pass  # connection drop on reboot is expected
 
-    # Background task: wait for host to recover then rescan to clear reboot_req flag
-    asyncio.create_task(_rescan_after_reboot(host_id, row["ip"], int(row["port"] or 22)))
+    reboot_timeout = int(defaults.get("reboot_timeout", 300))
+    asyncio.create_task(_rescan_after_reboot(host_id, row["ip"], int(row["port"] or 22), reboot_timeout))
     return {"ok": True}
 
 
