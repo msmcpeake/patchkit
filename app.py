@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.7.8"
+APP_VERSION = "1.7.9"
 
 CHANGELOG = [
+    {
+        "version": "1.7.9",
+        "date": "2026-06-03",
+        "changes": [
+            "Fix: patch output cards no longer go off-screen when patching multiple hosts; container is now scrollable and capped to viewport height",
+        ],
+    },
     {
         "version": "1.7.8",
         "date": "2026-06-02",

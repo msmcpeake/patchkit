@@ -168,7 +168,7 @@ tr:hover td{background:var(--bg)}
   .schedule-header>*:nth-child(2),.schedule-header>*:nth-child(3),.schedule-header>*:nth-child(4){display:none}
   .schedule-grid{grid-template-columns:1fr auto auto}
   .schedule-grid>*:nth-child(2),.schedule-grid>*:nth-child(3),.schedule-grid>*:nth-child(4){display:none}
-  #patch-modal{right:8px!important;left:8px!important;width:auto!important;max-width:none!important}
+  #patch-modal{right:8px!important;left:8px!important;width:auto!important;max-width:none!important;max-height:calc(100vh - 64px)!important}
   .modal{width:calc(100vw - 32px);padding:16px}
   .modal-bg{padding:0 16px}
 }
@@ -993,7 +993,7 @@ function rollingReboot(tag) {
   if (!modal) {
     modal = document.createElement('div');
     modal.id = 'patch-modal';
-    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px';
+    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 48px);overflow-y:auto';
     document.body.appendChild(modal);
   }
 
@@ -1339,7 +1339,7 @@ function streamPatch(url, hostId, remaining = []) {
   if (!modal) {
     modal = document.createElement('div');
     modal.id = 'patch-modal';
-    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px';
+    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 48px);overflow-y:auto';
     document.body.appendChild(modal);
   }
 
