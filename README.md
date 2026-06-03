@@ -109,6 +109,109 @@ Template: {"chat_id":"<CHAT_ID>","text":"PatchKit: {host} - {result_upper}\n{pac
 
 ntfy, Gotify, Slack, and Discord all work the same way.
 
+## Reverse proxy
+
+PatchKit listens on port 8080. Put it behind a reverse proxy to handle TLS and (optionally) authentication.
+
+**Important:** PatchKit binds to `0.0.0.0:8080` by default. If this host is internet-facing, firewall port 8080 so it is only reachable via the proxy.
+
+### nginx
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name patchkit.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+    location / {
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_buffering    off;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+### nginx with Authentik forward auth
+
+```nginx
+location /outpost.goauthentik.io {
+    proxy_pass       https://authentik.example.com/outpost.goauthentik.io;
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    auth_request_set $auth_cookie $upstream_http_set_cookie;
+    add_header       Set-Cookie $auth_cookie;
+}
+
+location / {
+    auth_request  /outpost.goauthentik.io/auth/nginx;
+    error_page 401 = @authentik_signin;
+
+    auth_request_set $ak_user $upstream_http_x_authentik_username;
+    auth_request_set $auth_cookie $upstream_http_set_cookie;
+    add_header       Set-Cookie $auth_cookie;
+    proxy_set_header X-Authentik-Username $ak_user;
+
+    proxy_pass         http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header   Upgrade $http_upgrade;
+    proxy_set_header   Connection "upgrade";
+    proxy_set_header   Host $host;
+    proxy_buffering    off;
+    proxy_read_timeout 300s;
+}
+
+location @authentik_signin {
+    return 302 https://patchkit.example.com/outpost.goauthentik.io/start?rd=$scheme://$host$request_uri;
+}
+```
+
+Then set `X-Authentik-Username` as the auth header in **Settings -> Access control**.
+
+### Caddy
+
+```caddy
+patchkit.example.com {
+    reverse_proxy localhost:8080 {
+        transport http {
+            read_buffer 0
+        }
+    }
+}
+```
+
+### Caddy with Authelia forward auth
+
+```caddy
+patchkit.example.com {
+    forward_auth localhost:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Name Remote-Email Remote-Groups
+    }
+
+    reverse_proxy localhost:8080 {
+        transport http {
+            read_buffer 0
+        }
+    }
+}
+```
+
+Then set `Remote-User` as the auth header in **Settings -> Access control**.
+
 ## Forward auth
 
 Set a header name in **Settings -> Access control** (e.g. `X-Authentik-Username`). PatchKit trusts the value of that header as the logged-in user identity. Any reverse proxy that injects a trusted header after authentication works (Authentik, Authelia, Caddy, nginx auth_request, etc.).
