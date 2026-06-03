@@ -37,9 +37,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 CHANGELOG = [
+    {
+        "version": "1.8.2",
+        "date": "2026-06-03",
+        "changes": [
+            "Last patched column on hosts page showing days since last successful patch run",
+            "Disable/enable host toggle: pause a host from scans and patches without deleting it; disabled hosts are dimmed with a grey dot",
+        ],
+    },
     {
         "version": "1.8.1",
         "date": "2026-06-03",
@@ -1439,6 +1447,17 @@ async def _run_scheduled_patch(schedule_id: int, host_ids: list[int]):
 def list_hosts():
     db = get_db()
     hosts = [dict(h) for h in db.execute("SELECT * FROM hosts ORDER BY name")]
+
+    # Build last-patched map from patch_runs
+    runs = db.execute(
+        "SELECT host_ids, finished_at FROM patch_runs WHERE result='ok' AND finished_at IS NOT NULL"
+    ).fetchall()
+    last_patched: dict[int, str] = {}
+    for run in runs:
+        for hid in json.loads(run["host_ids"] or "[]"):
+            if run["finished_at"] > last_patched.get(hid, ""):
+                last_patched[hid] = run["finished_at"]
+
     for h in hosts:
         scan = db.execute(
             "SELECT * FROM scan_results WHERE host_id=? ORDER BY id DESC LIMIT 1",
@@ -1458,6 +1477,7 @@ def list_hosts():
             }
         else:
             h["scan"] = None
+        h["last_patched"] = last_patched.get(h["id"])
     db.close()
     return hosts
 

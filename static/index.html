@@ -85,7 +85,7 @@ tr:hover td{background:var(--bg)}
 .search input{background:none;border:none;outline:none;color:var(--text);font-size:13px;width:160px}
 .search i{color:var(--text3);font-size:15px}
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0}
-.dot-ok{background:var(--green)}.dot-warn{background:#ef9f27}.dot-offline{background:var(--red)}
+.dot-ok{background:var(--green)}.dot-warn{background:#ef9f27}.dot-offline{background:var(--red)}.dot-disabled{background:var(--border2)}
 .dot-busy{background:var(--blue);animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .form-row{margin-bottom:12px}
@@ -673,16 +673,27 @@ async function hosts() {
     <div class="card-header"><h3><i class="ti ti-server"></i>All hosts (${hs.length})</h3></div>
     ${hs.length === 0 ? `<div class="empty"><i class="ti ti-server-off"></i><p>No hosts. Click "Add host" to get started.</p></div>` : `
     <table id="hosts-table">
-      <thead><tr><th>Hostname</th><th>IP</th><th>OS</th><th>Tags</th><th>Status</th><th>Disk</th><th>Uptime</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Hostname</th><th>IP</th><th>OS</th><th>Tags</th><th>Status</th><th>Disk</th><th>Uptime</th><th>Last patched</th><th>Actions</th></tr></thead>
       <tbody id="hosts-tbody">${hostsRows(hs)}</tbody>
     </table>`}
   </div>`;
 }
 
+function lastPatchedStr(h) {
+  if (!h.last_patched) return '<span style="color:var(--text3);font-size:12px">Never</span>';
+  const d = new Date(h.last_patched + 'Z');
+  const now = new Date();
+  const days = Math.floor((now - d) / 86400000);
+  const label = days === 0 ? 'Today' : days === 1 ? 'Yesterday' : `${days}d ago`;
+  return `<span style="font-size:12px;color:var(--text2)" title="${h.last_patched}">${label}</span>`;
+}
+
 function hostsRows(hs) {
-  return hs.map(h => `<tr id="host-row-${h.id}">
+  return hs.map(h => {
+    const disabled = !h.enabled;
+    return `<tr id="host-row-${h.id}" style="${disabled ? 'opacity:0.45' : ''}">
     <td>
-      <div style="display:flex;align-items:center;gap:7px"><span class="dot ${dotClass(h)}"></span><strong>${h.name}</strong>${rebootTag(h)}</div>
+      <div style="display:flex;align-items:center;gap:7px"><span class="dot ${disabled ? 'dot-disabled' : dotClass(h)}"></span><strong>${h.name}</strong>${disabled ? '<span class="badge badge-gray" style="font-size:10px">disabled</span>' : rebootTag(h)}</div>
       <div class="mono" style="font-size:11px;color:var(--text3);padding-left:14px">${h.role||''}</div>
       ${h.notes ? `<div style="font-size:11px;color:var(--text2);font-style:italic;padding-left:14px;margin-top:1px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h.notes}">${h.notes}</div>` : ''}
     </td>
@@ -692,20 +703,22 @@ function hostsRows(hs) {
       ${(()=>{const cred=S.credentials.find(c=>c.id===h.credential_id);return cred?`<span class="badge badge-purple" title="Using credential: ${cred.name}"><i class="ti ti-key"></i>${cred.name}</span>`:h.ssh_user&&h.ssh_user!=='root'?`<span class="badge badge-gray" title="Connects as ${h.ssh_user}, uses sudo"><i class="ti ti-terminal"></i>sudo</span>`:''})()}
     </td>
     <td>${tagBadges(h)}</td>
-    <td>${statusBadge(h)}</td>
-    <td>${diskBar(h)}</td>
-    <td>${uptimeStr(h)}</td>
+    <td>${disabled ? '' : statusBadge(h)}</td>
+    <td>${disabled ? '' : diskBar(h)}</td>
+    <td>${disabled ? '' : uptimeStr(h)}</td>
+    <td>${lastPatchedStr(h)}</td>
     <td><div class="btn-row">
-      <button class="btn btn-sm btn-icon" onclick="pingHost(${h.id},this)" title="Ping"><i class="ti ti-activity-heartbeat"></i></button>
-      <button class="btn btn-sm btn-icon" onclick="scanOne(${h.id})" title="Scan"><i class="ti ti-refresh"></i></button>
+      <button class="btn btn-sm btn-icon" onclick="toggleHostEnabled(${h.id},${disabled?1:0})" title="${disabled ? 'Enable host' : 'Disable host'}" style="color:${disabled ? 'var(--green)' : 'var(--text3)'}"><i class="ti ${disabled ? 'ti-player-play' : 'ti-pause'}"></i></button>
+      ${!disabled ? `<button class="btn btn-sm btn-icon" onclick="pingHost(${h.id},this)" title="Ping"><i class="ti ti-activity-heartbeat"></i></button>` : ''}
+      ${!disabled ? `<button class="btn btn-sm btn-icon" onclick="scanOne(${h.id})" title="Scan"><i class="ti ti-refresh"></i></button>` : ''}
       <button class="btn btn-sm btn-icon" onclick="editHost(${h.id})" title="Edit"><i class="ti ti-pencil"></i></button>
       <button class="btn btn-sm btn-icon" onclick="cloneHost(${h.id})" title="Clone"><i class="ti ti-copy"></i></button>
       <button class="btn btn-sm btn-icon" onclick="showHostHistory(${h.id},'${h.name}')" title="History"><i class="ti ti-history"></i></button>
-      ${h.scan && h.scan.reboot_req ? `<button class="btn btn-sm btn-amber btn-icon" onclick="rebootHost(${h.id},'${h.name}')" title="Reboot"><i class="ti ti-power"></i></button>` : ''}
-      ${h.scan && h.scan.pkg_count > 0 ? `<button class="btn btn-sm btn-primary" onclick="patchOne(${h.id})"><i class="ti ti-bolt"></i></button>` : ''}
+      ${!disabled && h.scan && h.scan.reboot_req ? `<button class="btn btn-sm btn-amber btn-icon" onclick="rebootHost(${h.id},'${h.name}')" title="Reboot"><i class="ti ti-power"></i></button>` : ''}
+      ${!disabled && h.scan && h.scan.pkg_count > 0 ? `<button class="btn btn-sm btn-primary" onclick="patchOne(${h.id})"><i class="ti ti-bolt"></i></button>` : ''}
       <button class="btn btn-sm btn-danger btn-icon" onclick="removeHost(${h.id},'${h.name}')" title="Remove"><i class="ti ti-trash"></i></button>
     </div></td>
-  </tr>`).join('');
+  </tr>`;}).join('');
 }
 
 function filterHosts(q) {
@@ -1194,7 +1207,7 @@ function patchOne(id) {
 }
 
 function patchAll() {
-  const hosts = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0);
+  const hosts = S.hosts.filter(h => h.enabled && h.scan && h.scan.pkg_count > 0);
   if (hosts.length === 0) { alert('Nothing to patch, all hosts are up to date.'); return; }
   const totalPkgs = hosts.reduce((n, h) => n + h.scan.pkg_count, 0);
   const lines = hosts.map(h => `  ${h.name}  (${h.scan.pkg_count} package${h.scan.pkg_count > 1 ? 's' : ''})`).join('\n');
@@ -1545,6 +1558,11 @@ function openAddHostModal() {
 async function removeHost(id, name) {
   if (!confirm(`Remove ${name}? This will delete all scan data for this host.`)) return;
   await api('DELETE', `/hosts/${id}`);
+  render();
+}
+
+async function toggleHostEnabled(id, enabled) {
+  await api('PATCH', `/hosts/${id}`, { enabled });
   render();
 }
 
