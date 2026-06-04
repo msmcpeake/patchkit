@@ -37,9 +37,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 
 CHANGELOG = [
+    {
+        "version": "1.8.3",
+        "date": "2026-06-04",
+        "changes": [
+            "Schedules now support groups/tags as targets: select tags and all hosts in those groups are patched at run time",
+            "Schedule list redesigned as responsive cards that display correctly on mobile",
+        ],
+    },
     {
         "version": "1.8.2",
         "date": "2026-06-03",
@@ -411,6 +419,7 @@ def _migrate_db():
         "ALTER TABLE hosts ADD COLUMN notes TEXT DEFAULT ''",
         "ALTER TABLE hosts ADD COLUMN sudo_pass TEXT DEFAULT ''",
         "ALTER TABLE hosts ADD COLUMN credential_id INTEGER",
+        "ALTER TABLE schedules ADD COLUMN tags TEXT DEFAULT ''",
     ]
     db = get_db()
     for sql in migrations:
@@ -1422,6 +1431,15 @@ async def _run_scheduled_patch(schedule_id: int, host_ids: list[int]):
     db = get_db()
     db.execute("UPDATE schedules SET last_run=datetime('now') WHERE id=?", (schedule_id,))
     db.commit()
+    row = db.execute("SELECT tags FROM schedules WHERE id=?", (schedule_id,)).fetchone()
+    tags = [t.strip() for t in (row["tags"] if row else "" or "").split(",") if t.strip()]
+    if tags:
+        tag_hosts = set()
+        for h in db.execute("SELECT id, tags FROM hosts WHERE enabled=1"):
+            host_tags = [t.strip() for t in (h["tags"] or "").split(",") if t.strip()]
+            if any(t in host_tags for t in tags):
+                tag_hosts.add(h["id"])
+        host_ids = list(set(host_ids) | tag_hosts)
     if not host_ids:
         host_ids = [r["id"] for r in db.execute("SELECT id FROM hosts WHERE enabled=1")]
     db.close()
@@ -2181,6 +2199,7 @@ def list_schedules():
     db.close()
     for r in rows:
         r["host_ids"] = json.loads(r["host_ids"] or "[]")
+        r["tags"] = r.get("tags") or ""
     return rows
 
 
@@ -2188,9 +2207,9 @@ def list_schedules():
 def add_schedule(body: dict):
     db = get_db()
     db.execute(
-        "INSERT INTO schedules (name, host_ids, cron_expr, enabled, next_run) VALUES (?,?,?,?,?)",
+        "INSERT INTO schedules (name, host_ids, tags, cron_expr, enabled, next_run) VALUES (?,?,?,?,?,?)",
         (body["name"], json.dumps(body.get("host_ids", [])),
-         body.get("cron_expr", ""), 1, "")
+         body.get("tags", ""), body.get("cron_expr", ""), 1, "")
     )
     db.commit()
     sid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -2210,6 +2229,8 @@ def update_schedule(sid: int, body: dict):
         fields["cron_expr"] = body["cron_expr"]
     if "host_ids" in body:
         fields["host_ids"] = json.dumps(body["host_ids"])
+    if "tags" in body:
+        fields["tags"] = body["tags"]
     if "enabled" in body:
         fields["enabled"] = body["enabled"]
     if fields:

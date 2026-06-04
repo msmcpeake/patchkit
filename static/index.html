@@ -133,8 +133,10 @@ tr:hover td{background:var(--bg)}
 .tag-kernel{background:var(--red-bg);color:var(--red)}
 .tag-security{background:var(--amber-bg);color:var(--amber)}
 .tag-user{background:var(--purple-bg);color:var(--purple)}
-.schedule-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 50px 64px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);gap:12px;font-size:13px}
-.schedule-grid:last-child{border-bottom:none}
+.schedule-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.schedule-card:last-child{border-bottom:none}
+.schedule-card-left{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.schedule-card-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
 .history-log-pre{font-family:'SF Mono',Monaco,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;line-height:1.7;padding:12px;background:var(--bg);border-radius:var(--radius);max-height:320px;overflow-y:auto;color:var(--text2)}
 .disk-bar{display:flex;align-items:center;gap:5px;font-size:11px}
 .disk-bar-track{width:48px;height:5px;background:var(--border);border-radius:3px;overflow:hidden;flex-shrink:0}
@@ -144,7 +146,6 @@ tr:hover td{background:var(--bg)}
 .host-tag{display:inline-flex;align-items:center;font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:var(--purple-bg);color:var(--purple);margin-right:3px;margin-top:2px}
 .group-host-row:last-child{border-bottom:none}
 .group-host-row:hover{background:var(--bg)}
-.schedule-header{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 50px 64px;padding:8px 16px;border-bottom:1px solid var(--border)}
 #mobile-header{display:none;position:fixed;top:0;left:0;right:0;height:46px;z-index:200;background:var(--surface);border-bottom:1px solid var(--border);align-items:center;padding:0 12px;gap:10px}
 #mobile-header button{background:none;border:none;cursor:pointer;color:var(--text);font-size:20px;padding:4px;line-height:1;border-radius:var(--radius)}
 #mobile-header button:hover{background:var(--bg)}
@@ -164,10 +165,7 @@ tr:hover td{background:var(--bg)}
   .main{padding:14px;padding-top:60px;max-height:none}
   .topbar{flex-wrap:wrap;gap:8px}
   table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .schedule-header{grid-template-columns:1fr auto auto}
-  .schedule-header>*:nth-child(2),.schedule-header>*:nth-child(3),.schedule-header>*:nth-child(4){display:none}
-  .schedule-grid{grid-template-columns:1fr auto auto}
-  .schedule-grid>*:nth-child(2),.schedule-grid>*:nth-child(3),.schedule-grid>*:nth-child(4){display:none}
+  .schedule-card-right{width:100%}
   #patch-modal{right:8px!important;left:8px!important;width:auto!important;max-width:none!important;max-height:calc(100vh - 64px)!important}
   .modal{width:calc(100vw - 32px);padding:16px}
   .modal-bg{padding:0 16px}
@@ -417,17 +415,21 @@ tr:hover td{background:var(--bg)}
 
 <!-- Edit Schedule Modal -->
 <div class="modal-bg" id="modal-edit-schedule">
-  <div class="modal">
+  <div class="modal" style="width:520px">
     <h3>Edit schedule</h3>
     <input type="hidden" id="es-id">
     <div class="form-row"><label>Name</label><input id="es-name" placeholder="Nightly patches"></div>
     <div class="form-row">
       <label>Cron expression</label>
       <input id="es-cron" placeholder="0 2 * * *">
-      <div class="form-hint">Format: minute hour day month weekday, e.g. <code>0 2 * * *</code> (daily 2 am), <code>0 3 * * 0</code> (weekly Sun 3 am)</div>
+      <div class="form-hint">minute hour day month weekday &mdash; e.g. <code>0 2 * * *</code> = daily 2 am, <code>0 3 * * 0</code> = weekly Sun 3 am</div>
     </div>
     <div class="form-row">
-      <label>Hosts</label>
+      <label>Groups <span style="color:var(--text3);font-weight:400">(by tag)</span></label>
+      <div id="es-tag-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
+    </div>
+    <div class="form-row">
+      <label>Individual hosts</label>
       <div id="es-host-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
       <div class="form-hint">Leave all unchecked to run on all enabled hosts</div>
     </div>
@@ -440,16 +442,20 @@ tr:hover td{background:var(--bg)}
 
 <!-- Add Schedule Modal -->
 <div class="modal-bg" id="modal-add-schedule">
-  <div class="modal">
+  <div class="modal" style="width:520px">
     <h3>New schedule</h3>
     <div class="form-row"><label>Name</label><input id="as-name" placeholder="Nightly patches"></div>
     <div class="form-row">
       <label>Cron expression</label>
       <input id="as-cron" placeholder="0 2 * * *">
-      <div class="form-hint">Format: minute hour day month weekday, e.g. <code>0 2 * * *</code> (daily 2 am), <code>0 3 * * 0</code> (weekly Sun 3 am)</div>
+      <div class="form-hint">minute hour day month weekday &mdash; e.g. <code>0 2 * * *</code> = daily 2 am, <code>0 3 * * 0</code> = weekly Sun 3 am</div>
     </div>
     <div class="form-row">
-      <label>Hosts</label>
+      <label>Groups <span style="color:var(--text3);font-weight:400">(by tag)</span></label>
+      <div id="as-tag-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
+    </div>
+    <div class="form-row">
+      <label>Individual hosts</label>
       <div id="as-host-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
       <div class="form-hint">Leave all unchecked to run on all enabled hosts</div>
     </div>
@@ -1064,22 +1070,34 @@ async function schedule() {
   <div class="topbar"><h2>Schedules</h2><button class="btn btn-primary" onclick="openAddScheduleModal()"><i class="ti ti-plus"></i>New schedule</button></div>
   <div class="card">
     <div class="card-header"><h3><i class="ti ti-calendar-event"></i>Patch schedules</h3></div>
-    ${scheds.length === 0 ? `<div class="empty"><i class="ti ti-calendar-off"></i><p>No schedules yet.</p></div>` : `
-    <div class="schedule-header">
-      ${['Name','Hosts','Cron','Next run','On',''].map(h=>`<span style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em">${h}</span>`).join('')}
-    </div>
-    ${scheds.map(s => `
-    <div class="schedule-grid">
-      <span style="font-weight:500">${s.name}</span>
-      <span class="badge badge-gray">${s.host_ids.length === 0 ? 'All hosts' : s.host_ids.length + ' host(s)'}</span>
-      <span class="mono" style="font-size:12px;color:var(--text2)">${s.cron_expr || '-'}</span>
-      <span style="color:var(--text3);font-size:12px">${s.enabled ? (s.next_run || '-') : 'disabled'}</span>
-      <label class="toggle"><input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleSchedule(${s.id},this.checked)"><span class="toggle-slider"></span></label>
-      <div style="display:flex;gap:4px;justify-content:flex-end">
+    ${scheds.length === 0 ? `<div class="empty"><i class="ti ti-calendar-off"></i><p>No schedules yet.</p></div>` : scheds.map(s => {
+      const tagList = (s.tags||'').split(',').map(t=>t.trim()).filter(Boolean);
+      const targetLabel = (() => {
+        const parts = [];
+        if (tagList.length) parts.push(tagList.map(t=>`<span class="badge badge-purple" style="font-size:10px"><i class="ti ti-tag"></i>${t}</span>`).join(''));
+        if (s.host_ids.length) parts.push(`<span class="badge badge-gray">${s.host_ids.length} host${s.host_ids.length>1?'s':''}</span>`);
+        if (!parts.length) parts.push('<span class="badge badge-gray">All hosts</span>');
+        return parts.join(' ');
+      })();
+      return `
+    <div class="schedule-card">
+      <div class="schedule-card-left">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <strong>${s.name}</strong>
+          ${targetLabel}
+          ${!s.enabled ? '<span class="badge badge-gray" style="font-size:10px">disabled</span>' : ''}
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:2px">
+          <span class="mono" style="font-size:12px;color:var(--text2)"><i class="ti ti-clock" style="font-size:11px"></i> ${s.cron_expr || '-'}</span>
+          <span style="font-size:12px;color:var(--text3)">${s.enabled ? (s.next_run ? 'Next: ' + s.next_run : '-') : 'disabled'}</span>
+        </div>
+      </div>
+      <div class="schedule-card-right">
+        <label class="toggle" title="${s.enabled?'Disable':'Enable'}"><input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleSchedule(${s.id},this.checked)"><span class="toggle-slider"></span></label>
         <button class="btn btn-sm btn-icon" onclick="editSchedule(${s.id})" title="Edit"><i class="ti ti-pencil"></i></button>
         <button class="btn btn-sm btn-icon btn-danger" onclick="deleteSchedule(${s.id})" title="Delete"><i class="ti ti-trash"></i></button>
       </div>
-    </div>`).join('')}`}
+    </div>`;}).join('')}
   </div>`;
 }
 
@@ -1336,17 +1354,38 @@ async function showHostHistory(id, name) {
   }
 }
 
+function _allTags() {
+  const tags = new Set();
+  S.hosts.forEach(h => (h.tags||'').split(',').map(t=>t.trim()).filter(Boolean).forEach(t=>tags.add(t)));
+  return [...tags].sort();
+}
+
+function _schedTagCheckboxes(prefix, selectedTags) {
+  const tags = _allTags();
+  if (!tags.length) return '<span style="color:var(--text3);font-size:12px">No groups defined</span>';
+  return tags.map(t => `
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
+      <input type="checkbox" class="${prefix}-tag-cb" value="${t}" ${selectedTags.includes(t)?'checked':''}><i class="ti ti-tag" style="font-size:11px;color:var(--purple)"></i>${t}
+    </label>`).join('');
+}
+
+function _schedHostCheckboxes(prefix, selectedIds) {
+  return S.hosts.filter(h=>h.enabled).map(h => `
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
+      <input type="checkbox" class="${prefix}-host-cb" value="${h.id}" ${selectedIds.includes(h.id)?'checked':''}>${h.name}
+    </label>`).join('');
+}
+
 async function editSchedule(id) {
   const scheds = await api('GET', '/schedules').catch(() => []);
   const s = scheds.find(x => x.id === id);
   if (!s) return;
+  const selectedTags = (s.tags||'').split(',').map(t=>t.trim()).filter(Boolean);
   document.getElementById('es-id').value = s.id;
   document.getElementById('es-name').value = s.name;
   document.getElementById('es-cron').value = s.cron_expr || '';
-  document.getElementById('es-host-list').innerHTML = S.hosts.map(h => `
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
-      <input type="checkbox" class="es-host-cb" value="${h.id}" ${s.host_ids.includes(h.id) ? 'checked' : ''}>${h.name}
-    </label>`).join('');
+  document.getElementById('es-tag-list').innerHTML = _schedTagCheckboxes('es', selectedTags);
+  document.getElementById('es-host-list').innerHTML = _schedHostCheckboxes('es', s.host_ids);
   openModal('modal-edit-schedule');
 }
 
@@ -1356,20 +1395,17 @@ async function updateSchedule() {
   const cron = document.getElementById('es-cron').value.trim();
   if (!name || !cron) { alert('Name and cron expression are required'); return; }
   const host_ids = Array.from(document.querySelectorAll('.es-host-cb:checked')).map(el => parseInt(el.value));
+  const tags = Array.from(document.querySelectorAll('.es-tag-cb:checked')).map(el => el.value).join(',');
   try {
-    await api('PATCH', `/schedules/${id}`, { name, cron_expr: cron, host_ids });
+    await api('PATCH', `/schedules/${id}`, { name, cron_expr: cron, host_ids, tags });
     closeModal('modal-edit-schedule');
     render();
   } catch(e) { alert('Error: ' + e.message); }
 }
 
 function openAddScheduleModal() {
-  const list = document.getElementById('as-host-list');
-  list.innerHTML = S.hosts.map(h => `
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
-      <input type="checkbox" class="as-host-cb" value="${h.id}">
-      ${h.name}
-    </label>`).join('');
+  document.getElementById('as-tag-list').innerHTML = _schedTagCheckboxes('as', []);
+  document.getElementById('as-host-list').innerHTML = _schedHostCheckboxes('as', []);
   document.getElementById('as-name').value = '';
   document.getElementById('as-cron').value = '';
   openModal('modal-add-schedule');
@@ -1379,9 +1415,10 @@ async function saveSchedule() {
   const name = document.getElementById('as-name').value.trim();
   const cron = document.getElementById('as-cron').value.trim();
   if (!name || !cron) { alert('Name and cron expression are required'); return; }
-  const checked = Array.from(document.querySelectorAll('.as-host-cb:checked')).map(el => parseInt(el.value));
+  const host_ids = Array.from(document.querySelectorAll('.as-host-cb:checked')).map(el => parseInt(el.value));
+  const tags = Array.from(document.querySelectorAll('.as-tag-cb:checked')).map(el => el.value).join(',');
   try {
-    await api('POST', '/schedules', { name, cron_expr: cron, host_ids: checked });
+    await api('POST', '/schedules', { name, cron_expr: cron, host_ids, tags });
     closeModal('modal-add-schedule');
     render();
   } catch(e) { alert('Error: ' + e.message); }
