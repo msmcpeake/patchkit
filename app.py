@@ -46,7 +46,7 @@ CHANGELOG = [
         "changes": [
             "Schedules now support groups/tags as targets: select tags and all hosts in those groups are patched at run time",
             "Schedule list redesigned as responsive cards that display correctly on mobile",
-            "Schedule modal shows a dynamic target summary — warns in amber when nothing is selected (all hosts fallback), otherwise describes exactly which groups and hosts will be patched",
+            "Schedule modal shows a dynamic target summary: warns in amber when nothing is selected (all hosts fallback), otherwise describes exactly which groups and hosts will be patched",
         ],
     },
     {
@@ -2044,7 +2044,7 @@ async def reboot_host_stream(host_id: int):
         await asyncio.sleep(10)
         try:
             await scan_host_async(host_id)
-            yield emit("Rescan complete — reboot flag cleared", "ok")
+            yield emit("Rescan complete, reboot flag cleared", "ok")
         except Exception as e:
             yield emit(f"Rescan failed: {e}", "warn")
 

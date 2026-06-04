@@ -422,7 +422,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row">
       <label>Cron expression</label>
       <input id="es-cron" placeholder="0 2 * * *">
-      <div class="form-hint">minute hour day month weekday &mdash; e.g. <code>0 2 * * *</code> = daily 2 am, <code>0 3 * * 0</code> = weekly Sun 3 am</div>
+      <div class="form-hint">minute hour day month weekday, e.g. <code>0 2 * * *</code> = daily 2 am, <code>0 3 * * 0</code> = weekly Sun 3 am</div>
     </div>
     <div class="form-row">
       <label>Groups <span style="color:var(--text3);font-weight:400">(by tag)</span></label>
@@ -448,7 +448,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row">
       <label>Cron expression</label>
       <input id="as-cron" placeholder="0 2 * * *">
-      <div class="form-hint">minute hour day month weekday &mdash; e.g. <code>0 2 * * *</code> = daily 2 am, <code>0 3 * * 0</code> = weekly Sun 3 am</div>
+      <div class="form-hint">minute hour day month weekday, e.g. <code>0 2 * * *</code> = daily 2 am, <code>0 3 * * 0</code> = weekly Sun 3 am</div>
     </div>
     <div class="form-row">
       <label>Groups <span style="color:var(--text3);font-weight:400">(by tag)</span></label>
@@ -1382,7 +1382,7 @@ function _updateSchedHint(prefix) {
   const hint = document.getElementById(`${prefix}-target-hint`);
   if (!hint) return;
   if (!tags.length && !hosts.length) {
-    hint.textContent = 'Nothing selected — will run on all enabled hosts.';
+    hint.textContent = 'Nothing selected - will run on all enabled hosts.';
     hint.style.color = 'var(--amber)';
   } else {
     const parts = [];
