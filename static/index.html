@@ -431,7 +431,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row">
       <label>Individual hosts</label>
       <div id="es-host-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
-      <div class="form-hint">Leave all unchecked to run on all enabled hosts</div>
+      <div class="form-hint" id="es-target-hint"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('modal-edit-schedule')">Cancel</button>
@@ -457,7 +457,7 @@ tr:hover td{background:var(--bg)}
     <div class="form-row">
       <label>Individual hosts</label>
       <div id="as-host-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
-      <div class="form-hint">Leave all unchecked to run on all enabled hosts</div>
+      <div class="form-hint" id="as-target-hint"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('modal-add-schedule')">Cancel</button>
@@ -1365,15 +1365,32 @@ function _schedTagCheckboxes(prefix, selectedTags) {
   if (!tags.length) return '<span style="color:var(--text3);font-size:12px">No groups defined</span>';
   return tags.map(t => `
     <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
-      <input type="checkbox" class="${prefix}-tag-cb" value="${t}" ${selectedTags.includes(t)?'checked':''}><i class="ti ti-tag" style="font-size:11px;color:var(--purple)"></i>${t}
+      <input type="checkbox" class="${prefix}-tag-cb" value="${t}" ${selectedTags.includes(t)?'checked':''} onchange="_updateSchedHint('${prefix}')"><i class="ti ti-tag" style="font-size:11px;color:var(--purple)"></i>${t}
     </label>`).join('');
 }
 
 function _schedHostCheckboxes(prefix, selectedIds) {
   return S.hosts.filter(h=>h.enabled).map(h => `
     <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
-      <input type="checkbox" class="${prefix}-host-cb" value="${h.id}" ${selectedIds.includes(h.id)?'checked':''}>${h.name}
+      <input type="checkbox" class="${prefix}-host-cb" value="${h.id}" ${selectedIds.includes(h.id)?'checked':''} onchange="_updateSchedHint('${prefix}')">  ${h.name}
     </label>`).join('');
+}
+
+function _updateSchedHint(prefix) {
+  const tags = Array.from(document.querySelectorAll(`.${prefix}-tag-cb:checked`)).map(el => el.value);
+  const hosts = Array.from(document.querySelectorAll(`.${prefix}-host-cb:checked`));
+  const hint = document.getElementById(`${prefix}-target-hint`);
+  if (!hint) return;
+  if (!tags.length && !hosts.length) {
+    hint.textContent = 'Nothing selected — will run on all enabled hosts.';
+    hint.style.color = 'var(--amber)';
+  } else {
+    const parts = [];
+    if (tags.length) parts.push(`groups: ${tags.join(', ')}`);
+    if (hosts.length) parts.push(`${hosts.length} individual host${hosts.length>1?'s':''}`);
+    hint.textContent = `Will run on ${parts.join(' + ')}.`;
+    hint.style.color = 'var(--text3)';
+  }
 }
 
 async function editSchedule(id) {
@@ -1386,6 +1403,7 @@ async function editSchedule(id) {
   document.getElementById('es-cron').value = s.cron_expr || '';
   document.getElementById('es-tag-list').innerHTML = _schedTagCheckboxes('es', selectedTags);
   document.getElementById('es-host-list').innerHTML = _schedHostCheckboxes('es', s.host_ids);
+  _updateSchedHint('es');
   openModal('modal-edit-schedule');
 }
 
@@ -1408,6 +1426,7 @@ function openAddScheduleModal() {
   document.getElementById('as-host-list').innerHTML = _schedHostCheckboxes('as', []);
   document.getElementById('as-name').value = '';
   document.getElementById('as-cron').value = '';
+  _updateSchedHint('as');
   openModal('modal-add-schedule');
 }
 

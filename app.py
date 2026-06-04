@@ -46,6 +46,7 @@ CHANGELOG = [
         "changes": [
             "Schedules now support groups/tags as targets: select tags and all hosts in those groups are patched at run time",
             "Schedule list redesigned as responsive cards that display correctly on mobile",
+            "Schedule modal shows a dynamic target summary — warns in amber when nothing is selected (all hosts fallback), otherwise describes exactly which groups and hosts will be patched",
         ],
     },
     {
