@@ -2,6 +2,12 @@
 
 A lightweight home server patch manager. SSH into your Linux hosts, check for pending package updates, apply upgrades, and track reboot requirements from a single web UI.
 
+## Screenshots
+
+![Dashboard](docs/screenshot.png)
+![Groups](docs/screenshot2.png)
+![Live patch output](docs/screenshot3.png)
+
 ## Features
 
 - **Dashboard** - at-a-glance view of all hosts, pending updates, security flags, and reboot status
