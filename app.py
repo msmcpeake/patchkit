@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"
 
 CHANGELOG = [
+    {
+        "version": "1.8.5",
+        "date": "2026-06-05",
+        "changes": [
+            "Patch and reboot monitoring redesigned as a single split-pane panel: host list on the left with status dots and last log line, full log on the right for the selected host; replaces the stacked card layout that cluttered the screen when patching many hosts at once",
+        ],
+    },
     {
         "version": "1.8.4",
         "date": "2026-06-05",

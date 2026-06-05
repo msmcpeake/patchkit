@@ -166,7 +166,8 @@ tr:hover td{background:var(--bg)}
   .topbar{flex-wrap:wrap;gap:8px}
   table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
   .schedule-card-right{width:100%}
-  #patch-modal{right:8px!important;left:8px!important;width:auto!important;max-width:none!important;max-height:calc(100vh - 64px)!important}
+  #op-panel{right:8px!important;left:8px!important;width:auto!important;height:320px!important}
+  #op-panel-list{width:140px!important}
   .modal{width:calc(100vw - 32px);padding:16px}
   .modal-bg{padding:0 16px}
 }
@@ -1003,56 +1004,115 @@ function patchGroup(tag) {
   ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
 }
 
+// ---- Unified operation panel ----
+let _opState = {};
+let _opSelected = null;
+
+function _getOpPanel() {
+  let panel = document.getElementById('op-panel');
+  if (panel) return panel;
+  panel = document.createElement('div');
+  panel.id = 'op-panel';
+  panel.style.cssText = 'position:fixed;bottom:24px;right:24px;width:640px;max-width:calc(100vw - 16px);height:360px;z-index:200;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 4px 32px rgba(0,0,0,.22);overflow:hidden';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span id="op-panel-title" style="font-size:13px;font-weight:600"></span>
+      <button onclick="_closeOpPanel()" title="Dismiss" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px;padding:2px 4px;line-height:1"><i class="ti ti-x"></i></button>
+    </div>
+    <div style="display:flex;flex:1;min-height:0">
+      <div id="op-panel-list" style="width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto"></div>
+      <div id="op-panel-log" class="log-box" style="flex:1;border-radius:0;margin:0;max-height:none"></div>
+    </div>`;
+  document.body.appendChild(panel);
+  return panel;
+}
+
+function _closeOpPanel() {
+  const running = Object.values(_opState).some(o => o.status === 'running');
+  if (running && !confirm('Operations are still running. Dismiss anyway?')) return;
+  const panel = document.getElementById('op-panel');
+  if (panel) panel.remove();
+  _opState = {};
+  _opSelected = null;
+}
+
+function _renderOpPanel() {
+  const panel = document.getElementById('op-panel');
+  if (!panel) return;
+  const ops = Object.entries(_opState);
+  const running = ops.filter(([,o]) => o.status === 'running').length;
+  const titleEl = document.getElementById('op-panel-title');
+  if (titleEl) titleEl.textContent = running > 0
+    ? `${running} of ${ops.length} active`
+    : `${ops.length} operation${ops.length > 1 ? 's' : ''} complete`;
+
+  const list = document.getElementById('op-panel-list');
+  if (list) list.innerHTML = ops.map(([key, o]) => {
+    const dotCls = o.status === 'running' ? 'dot-busy' : o.status === 'ok' ? 'dot-ok' : o.status === 'error' ? 'dot-offline' : 'dot-warn';
+    const sel = _opSelected === key;
+    return `<div onclick="_selectOp('${key}')" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--border);background:${sel ? 'var(--bg)' : 'transparent'}">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span class="dot ${dotCls}" style="flex-shrink:0"></span>
+        <span style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${o.label}</span>
+      </div>
+      ${o.lastLine ? `<div style="font-size:10px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:16px;margin-top:2px">${o.lastLine}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  const logEl = document.getElementById('op-panel-log');
+  if (logEl && _opSelected && _opState[_opSelected]) {
+    const atBottom = logEl.scrollHeight - logEl.scrollTop <= logEl.clientHeight + 20;
+    logEl.innerHTML = _opState[_opSelected].lines.map(({level, msg}) => `<div class="log-${level}">${msg}</div>`).join('');
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+function _selectOp(key) { _opSelected = key; _renderOpPanel(); }
+
+function _opStart(key, label) {
+  _opState[key] = { label, lines: [], status: 'running', lastLine: '' };
+  if (!_opSelected) _opSelected = key;
+  _getOpPanel();
+  _renderOpPanel();
+}
+
+function _opLine(key, level, msg) {
+  if (!_opState[key]) return;
+  _opState[key].lines.push({ level, msg });
+  _opState[key].lastLine = msg;
+  _renderOpPanel();
+}
+
+function _opDone(key, status) {
+  if (!_opState[key]) return;
+  _opState[key].status = status;
+  if (_opSelected === key) {
+    const next = Object.keys(_opState).find(k => _opState[k].status === 'running');
+    if (next) _opSelected = next;
+  }
+  _renderOpPanel();
+}
+// ---- End unified panel ----
+
 function rollingReboot(tag) {
   if (!confirm(`Rolling reboot all hosts in group "${tag}"?\n\nEach host will be rebooted one at a time and must recover before the next is rebooted.`)) return;
   const ids = S.hosts.filter(h => hostTagList(h).includes(tag)).map(h => h.id);
   ids.forEach(id => S.patching.add(id));
-
-  let modal = document.getElementById('patch-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'patch-modal';
-    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 48px);overflow-y:auto';
-    document.body.appendChild(modal);
-  }
-
-  const cardId = 'rolling-reboot-' + tag;
-  const logId  = 'log-rolling-' + tag;
-  let card = document.getElementById(cardId);
-  if (card) card.remove();
-  card = document.createElement('div');
-  card.id = cardId;
-  card.className = 'card';
-  card.style.cssText = 'box-shadow:0 4px 24px rgba(0,0,0,0.18)';
-  card.innerHTML = `
-    <div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-      <h3><span class="dot dot-busy" style="margin-right:6px"></span>Rolling reboot: ${tag}</h3>
-      <button class="btn btn-sm btn-icon" onclick="event.stopPropagation();this.closest('#${cardId}').remove()" title="Dismiss"><i class="ti ti-x"></i></button>
-    </div>
-    <div class="log-box" id="${logId}" style="border-radius:0;max-height:180px"></div>`;
-  modal.appendChild(card);
-
-  const box = document.getElementById(logId);
-  const es  = new EventSource(`/api/rolling-reboot/${encodeURIComponent(tag)}`);
+  const key = 'rolling-' + tag;
+  _opStart(key, 'Rolling reboot: ' + tag);
+  const es = new EventSource(`/api/rolling-reboot/${encodeURIComponent(tag)}`);
   es.onmessage = e => {
     if (e.data === 'DONE') {
       es.close();
       ids.forEach(id => S.patching.delete(id));
-      const dot = card.querySelector('.dot');
-      if (dot) dot.className = 'dot dot-ok';
-      setTimeout(() => { if (box) box.style.display = 'none'; }, 3000);
+      _opDone(key, 'ok');
       loadHosts().then(() => render());
       return;
     }
     const [level, ...rest] = e.data.split('|');
-    const msg  = rest.join('|');
-    const line = document.createElement('div');
-    line.className = 'log-' + (level || 'info');
-    line.textContent = msg;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
+    _opLine(key, level || 'info', rest.join('|'));
   };
-  es.onerror = () => { es.close(); ids.forEach(id => S.patching.delete(id)); };
+  es.onerror = () => { es.close(); ids.forEach(id => S.patching.delete(id)); _opDone(key, 'error'); };
 }
 
 function patchAllGroups() {
@@ -1236,48 +1296,20 @@ function patchAll() {
 }
 
 function streamReboot(hostId, hostName) {
-  let modal = document.getElementById('patch-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'patch-modal';
-    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 48px);overflow-y:auto';
-    document.body.appendChild(modal);
-  }
-  const cardId = 'reboot-card-' + hostId;
-  const logId  = 'reboot-log-' + hostId;
-  let card = document.getElementById(cardId);
-  if (card) card.remove();
-  card = document.createElement('div');
-  card.id = cardId;
-  card.className = 'card';
-  card.style.cssText = 'box-shadow:0 4px 24px rgba(0,0,0,0.18)';
-  card.innerHTML = `
-    <div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-      <h3><span class="dot dot-busy" style="margin-right:6px"></span>Rebooting ${hostName}</h3>
-      <button class="btn btn-sm btn-icon" onclick="event.stopPropagation();this.closest('#${cardId}').remove()" title="Dismiss"><i class="ti ti-x"></i></button>
-    </div>
-    <div class="log-box" id="${logId}" style="border-radius:0;max-height:180px"></div>`;
-  modal.appendChild(card);
-
-  const box = document.getElementById(logId);
-  const es  = new EventSource(`/api/hosts/${hostId}/reboot`);
+  const key = 'reboot-' + hostId;
+  _opStart(key, 'Reboot: ' + hostName);
+  const es = new EventSource(`/api/hosts/${hostId}/reboot`);
   es.onmessage = e => {
     if (e.data === 'DONE') {
       es.close();
-      const dot = card.querySelector('.dot');
-      if (dot) dot.className = 'dot dot-ok';
-      setTimeout(() => { if (box) box.style.display = 'none'; }, 3000);
+      _opDone(key, 'ok');
       loadHosts().then(() => render());
       return;
     }
     const [level, ...rest] = e.data.split('|');
-    const line = document.createElement('div');
-    line.className = 'log-' + (level || 'info');
-    line.textContent = rest.join('|');
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
+    _opLine(key, level || 'info', rest.join('|'));
   };
-  es.onerror = () => { es.close(); };
+  es.onerror = () => { es.close(); _opDone(key, 'error'); };
 }
 
 async function rebootHost(id, name) {
@@ -1447,44 +1479,14 @@ async function saveSchedule() {
 
 function streamPatch(url, hostId, remaining = []) {
   const h = S.hosts.find(x => x.id === hostId);
-  const hostName = h ? h.name : 'host ' + hostId;
-
-  let modal = document.getElementById('patch-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'patch-modal';
-    modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:520px;max-width:95vw;z-index:200;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 48px);overflow-y:auto';
-    document.body.appendChild(modal);
-  }
-
-  const cardId = 'patch-card-' + hostId;
-  const logId = 'log-' + hostId;
-  const card = document.createElement('div');
-  card.id = cardId;
-  card.className = 'card';
-  card.style.cssText = 'box-shadow:0 4px 24px rgba(0,0,0,0.18)';
-  card.innerHTML = `
-    <div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-      <h3><span class="dot dot-busy" style="margin-right:6px"></span>Patching ${hostName}</h3>
-      <button class="btn btn-sm btn-icon" onclick="event.stopPropagation();this.closest('#${cardId}').remove()" title="Dismiss"><i class="ti ti-x"></i></button>
-    </div>
-    <div class="log-box" id="${logId}" style="border-radius:0;max-height:180px"></div>`;
-  modal.appendChild(card);
-
-  const box = document.getElementById(logId);
+  const key = 'patch-' + hostId;
+  _opStart(key, h ? h.name : 'host ' + hostId);
   const es = new EventSource(url);
-
   es.onmessage = e => {
     if (e.data === 'DONE') {
       es.close();
       S.patching.delete(hostId);
-      const c = document.getElementById('patch-card-' + hostId);
-      if (c) {
-        const dot = c.querySelector('.dot');
-        if (dot) dot.className = 'dot dot-ok';
-        const logBox = document.getElementById('log-' + hostId);
-        setTimeout(() => { if (logBox) logBox.style.display = 'none'; }, 3000);
-      }
+      _opDone(key, 'ok');
       loadHosts().then(() => {
         if (remaining.length > 0) {
           const next = remaining[0];
@@ -1496,14 +1498,9 @@ function streamPatch(url, hostId, remaining = []) {
       return;
     }
     const [level, ...rest] = e.data.split('|');
-    const msg = rest.join('|');
-    const line = document.createElement('div');
-    line.className = 'log-' + (level || 'info');
-    line.textContent = msg;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
+    _opLine(key, level || 'info', rest.join('|'));
   };
-  es.onerror = () => { es.close(); S.patching.delete(hostId); };
+  es.onerror = () => { es.close(); S.patching.delete(hostId); _opDone(key, 'error'); };
 }
 
 async function detectOsNew() {
