@@ -1040,6 +1040,7 @@ function rollingReboot(tag) {
       ids.forEach(id => S.patching.delete(id));
       const dot = card.querySelector('.dot');
       if (dot) dot.className = 'dot dot-ok';
+      setTimeout(() => { if (box) box.style.display = 'none'; }, 3000);
       loadHosts().then(() => render());
       return;
     }
@@ -1265,6 +1266,7 @@ function streamReboot(hostId, hostName) {
       es.close();
       const dot = card.querySelector('.dot');
       if (dot) dot.className = 'dot dot-ok';
+      setTimeout(() => { if (box) box.style.display = 'none'; }, 3000);
       loadHosts().then(() => render());
       return;
     }
@@ -1477,7 +1479,12 @@ function streamPatch(url, hostId, remaining = []) {
       es.close();
       S.patching.delete(hostId);
       const c = document.getElementById('patch-card-' + hostId);
-      if (c) { const dot = c.querySelector('.dot'); if (dot) dot.className = 'dot dot-ok'; }
+      if (c) {
+        const dot = c.querySelector('.dot');
+        if (dot) dot.className = 'dot dot-ok';
+        const logBox = document.getElementById('log-' + hostId);
+        setTimeout(() => { if (logBox) logBox.style.display = 'none'; }, 3000);
+      }
       loadHosts().then(() => {
         if (remaining.length > 0) {
           const next = remaining[0];

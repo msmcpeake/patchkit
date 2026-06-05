@@ -37,9 +37,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 
 CHANGELOG = [
+    {
+        "version": "1.8.4",
+        "date": "2026-06-05",
+        "changes": [
+            "Patch/reboot cards auto-collapse their log output 3 seconds after completing, reducing clutter when patching many hosts at once; click the header to re-expand",
+        ],
+    },
     {
         "version": "1.8.3",
         "date": "2026-06-04",
