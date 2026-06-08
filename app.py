@@ -37,9 +37,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.6"
 
 CHANGELOG = [
+    {
+        "version": "1.8.6",
+        "date": "2026-06-08",
+        "changes": [
+            "Hosts and history tables are now sortable by clicking column headers",
+            "GitHub link added to sidebar footer",
+        ],
+    },
     {
         "version": "1.8.5",
         "date": "2026-06-05",
