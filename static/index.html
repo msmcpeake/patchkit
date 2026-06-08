@@ -59,6 +59,8 @@ nav{padding:8px 0;flex:1}
 .card-header h3{font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:8px 14px;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border);white-space:nowrap}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--text2)}
 td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--bg)}
@@ -198,7 +200,10 @@ tr:hover td{background:var(--bg)}
         <div id="version-badge" onclick="showChangelog()" style="font-size:11px;color:var(--text3);cursor:pointer;display:flex;align-items:center;gap:5px;transition:color .15s;padding:4px 0 8px" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'">
           <i class="ti ti-tag" style="font-size:12px"></i><span id="version-label">PatchKit</span>
         </div>
-        <button id="theme-btn" onclick="cycleTheme()" title="Toggle theme" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px 6px 8px;line-height:1" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'"><i class="ti ti-sun-moon"></i></button>
+        <div style="display:flex;align-items:center">
+          <a href="https://github.com/msmcpeake/patchkit" target="_blank" title="PatchKit on GitHub" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px 6px 8px;line-height:1;text-decoration:none;display:flex;align-items:center" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'"><i class="ti ti-brand-github"></i></a>
+          <button id="theme-btn" onclick="cycleTheme()" title="Toggle theme" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px 6px 8px;line-height:1" onmouseover="this.style.color='var(--text2)'" onmouseout="this.style.color='var(--text3)'"><i class="ti ti-sun-moon"></i></button>
+        </div>
       </div>
     </div>
   </aside>
@@ -680,8 +685,18 @@ async function hosts() {
     <div class="card-header"><h3><i class="ti ti-server"></i>All hosts (${hs.length})</h3></div>
     ${hs.length === 0 ? `<div class="empty"><i class="ti ti-server-off"></i><p>No hosts. Click "Add host" to get started.</p></div>` : `
     <table id="hosts-table">
-      <thead><tr><th>Hostname</th><th>IP</th><th>OS</th><th>Tags</th><th>Status</th><th>Disk</th><th>Uptime</th><th>Last patched</th><th>Actions</th></tr></thead>
-      <tbody id="hosts-tbody">${hostsRows(hs)}</tbody>
+      <thead><tr>
+        <th class="sortable" data-col="name" onclick="sortHosts('name')">Hostname ${_sortIcon(_hostsSort,'name')}</th>
+        <th class="sortable" data-col="ip" onclick="sortHosts('ip')">IP ${_sortIcon(_hostsSort,'ip')}</th>
+        <th class="sortable" data-col="os" onclick="sortHosts('os')">OS ${_sortIcon(_hostsSort,'os')}</th>
+        <th class="sortable" data-col="tags" onclick="sortHosts('tags')">Tags ${_sortIcon(_hostsSort,'tags')}</th>
+        <th class="sortable" data-col="status" onclick="sortHosts('status')">Status ${_sortIcon(_hostsSort,'status')}</th>
+        <th class="sortable" data-col="disk" onclick="sortHosts('disk')">Disk ${_sortIcon(_hostsSort,'disk')}</th>
+        <th>Uptime</th>
+        <th class="sortable" data-col="patched" onclick="sortHosts('patched')">Last patched ${_sortIcon(_hostsSort,'patched')}</th>
+        <th>Actions</th>
+      </tr></thead>
+      <tbody id="hosts-tbody">${hostsRows(_sortedHosts(hs))}</tbody>
     </table>`}
   </div>`;
 }
@@ -738,7 +753,89 @@ function filterHosts(q) {
     (h.role||'').toLowerCase().includes(lq) ||
     (h.tags||'').toLowerCase().includes(lq)
   ) : S.hosts;
-  tbody.innerHTML = hostsRows(filtered);
+  tbody.innerHTML = hostsRows(_sortedHosts(filtered));
+}
+
+function _sortIcon(s, col) {
+  if (s.col !== col) return '<i class="ti ti-selector sort-icon" style="opacity:0.35;font-size:10px;margin-left:2px"></i>';
+  return `<i class="ti ${s.dir==='asc'?'ti-chevron-up':'ti-chevron-down'} sort-icon" style="font-size:10px;margin-left:2px;color:var(--purple)"></i>`;
+}
+
+function _sortedHosts(hs) {
+  const {col, dir} = _hostsSort;
+  if (!col) return hs;
+  return [...hs].sort((a, b) => {
+    let av, bv, cmp;
+    if (col === 'name')        { av = a.name;              bv = b.name; }
+    else if (col === 'ip')     { av = a.ip;                bv = b.ip; }
+    else if (col === 'os')     { av = a.os_name||'';       bv = b.os_name||''; }
+    else if (col === 'status') { const r={ok:0,warn:1,error:2,offline:3}; cmp=(r[a.scan?.status]??4)-(r[b.scan?.status]??4); return dir==='asc'?cmp:-cmp; }
+    else if (col === 'disk')   { cmp=(parseFloat(a.scan?.disk_used_pct)||0)-(parseFloat(b.scan?.disk_used_pct)||0); return dir==='asc'?cmp:-cmp; }
+    else if (col === 'tags')   { av = a.tags||'';           bv = b.tags||''; }
+    else if (col === 'patched'){ av = a.last_patched||'';  bv = b.last_patched||''; }
+    else return 0;
+    cmp = String(av).localeCompare(String(bv));
+    return dir === 'asc' ? cmp : -cmp;
+  });
+}
+
+function sortHosts(col) {
+  _hostsSort = _hostsSort.col === col && _hostsSort.dir === 'asc' ? {col, dir:'desc'} : {col, dir:'asc'};
+  const tbody = document.getElementById('hosts-tbody');
+  if (!tbody) return;
+  const q = document.getElementById('host-search')?.value || '';
+  const base = q ? S.hosts.filter(h =>
+    h.name.toLowerCase().includes(q.toLowerCase()) ||
+    h.ip.includes(q) ||
+    (h.role||'').toLowerCase().includes(q.toLowerCase()) ||
+    (h.tags||'').toLowerCase().includes(q.toLowerCase())
+  ) : S.hosts;
+  tbody.innerHTML = hostsRows(_sortedHosts(base));
+  document.querySelectorAll('#hosts-table th.sortable').forEach(th => {
+    const ico = th.querySelector('.sort-icon');
+    if (!ico) return;
+    const active = th.dataset.col === _hostsSort.col;
+    ico.className = 'ti sort-icon ' + (active ? (_hostsSort.dir==='asc' ? 'ti-chevron-up' : 'ti-chevron-down') : 'ti-selector');
+    ico.style.cssText = active ? 'font-size:10px;margin-left:2px;color:var(--purple)' : 'font-size:10px;margin-left:2px;opacity:0.35';
+  });
+}
+
+function historyRows(runs) {
+  return runs.map(r => `<tr>
+    <td class="mono" style="font-size:12px;color:var(--text2)">${r.started_at}</td>
+    <td>${(r.host_names||[]).join(', ') || 'All'}</td>
+    <td>${r.pkg_count}</td>
+    <td>${r.result === 'ok' ? `<span class="badge badge-ok"><i class="ti ti-check"></i>Success</span>` : r.result === 'error' ? `<span class="badge badge-danger"><i class="ti ti-x"></i>Error</span>` : `<span class="badge badge-warn"><i class="ti ti-alert-triangle"></i>Warning</span>`}</td>
+    <td style="color:var(--text3);font-size:12px">${r.duration_s ? r.duration_s + 's' : '-'}</td>
+    <td><button class="btn btn-sm" onclick="showLog(${r.id},'${(r.host_names||[]).join(', ')||'All'}')"><i class="ti ti-file-text"></i>Log</button></td>
+  </tr>`).join('');
+}
+
+function _sortedHistory(runs) {
+  const {col, dir} = _historySort;
+  return [...runs].sort((a, b) => {
+    let cmp;
+    if (col === 'started_at')  cmp = a.started_at.localeCompare(b.started_at);
+    else if (col === 'pkg_count')  cmp = (a.pkg_count||0) - (b.pkg_count||0);
+    else if (col === 'result')     cmp = (a.result||'').localeCompare(b.result||'');
+    else if (col === 'duration_s') cmp = (a.duration_s||0) - (b.duration_s||0);
+    else return 0;
+    return dir === 'asc' ? cmp : -cmp;
+  });
+}
+
+function sortHistory(col) {
+  _historySort = _historySort.col === col && _historySort.dir === 'asc' ? {col, dir:'desc'} : {col, dir:'asc'};
+  const tbody = document.getElementById('history-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = historyRows(_sortedHistory(_historyRuns));
+  document.querySelectorAll('#history-table th.sortable').forEach(th => {
+    const ico = th.querySelector('.sort-icon');
+    if (!ico) return;
+    const active = th.dataset.col === _historySort.col;
+    ico.className = 'ti sort-icon ' + (active ? (_historySort.dir==='asc' ? 'ti-chevron-up' : 'ti-chevron-down') : 'ti-selector');
+    ico.style.cssText = active ? 'font-size:10px;margin-left:2px;color:var(--purple)' : 'font-size:10px;margin-left:2px;opacity:0.35';
+  });
 }
 
 // --- Credentials page ---
@@ -850,6 +947,9 @@ function onCredentialChange(prefix) {
 // --- Updates page ---
 let _updatesSecOnly = false;
 let _updatesFilter = '';
+let _hostsSort = {col: null, dir: 'asc'};
+let _historyRuns = [];
+let _historySort = {col: 'started_at', dir: 'desc'};
 
 async function updates() {
   const needPatch = S.hosts.filter(h => h.scan && h.scan.pkg_count > 0);
@@ -1164,24 +1264,22 @@ async function schedule() {
 
 // --- History page ---
 async function history() {
-  const runs = await api('GET', '/history').catch(() => []);
+  _historyRuns = await api('GET', '/history').catch(() => []);
   return `
   <div class="topbar"><h2>History</h2></div>
   <div class="card">
     <div class="card-header"><h3><i class="ti ti-history"></i>Patch runs</h3></div>
-    ${runs.length === 0 ? `<div class="empty"><i class="ti ti-clock-off"></i><p>No patch runs yet.</p></div>` : `
-    <table>
-      <thead><tr><th>Time</th><th>Hosts</th><th>Packages</th><th>Result</th><th>Duration</th><th></th></tr></thead>
-      <tbody>
-        ${runs.map(r => `<tr>
-          <td class="mono" style="font-size:12px;color:var(--text2)">${r.started_at}</td>
-          <td>${(r.host_names||[]).join(', ') || 'All'}</td>
-          <td>${r.pkg_count}</td>
-          <td>${r.result === 'ok' ? `<span class="badge badge-ok"><i class="ti ti-check"></i>Success</span>` : r.result === 'error' ? `<span class="badge badge-danger"><i class="ti ti-x"></i>Error</span>` : `<span class="badge badge-warn"><i class="ti ti-alert-triangle"></i>Warning</span>`}</td>
-          <td style="color:var(--text3);font-size:12px">${r.duration_s ? r.duration_s + 's' : '-'}</td>
-          <td><button class="btn btn-sm" onclick="showLog(${r.id},'${(r.host_names||[]).join(', ')||'All'}')"><i class="ti ti-file-text"></i>Log</button></td>
-        </tr>`).join('')}
-      </tbody>
+    ${_historyRuns.length === 0 ? `<div class="empty"><i class="ti ti-clock-off"></i><p>No patch runs yet.</p></div>` : `
+    <table id="history-table">
+      <thead><tr>
+        <th class="sortable" data-col="started_at" onclick="sortHistory('started_at')">Time ${_sortIcon(_historySort,'started_at')}</th>
+        <th>Hosts</th>
+        <th class="sortable" data-col="pkg_count" onclick="sortHistory('pkg_count')">Packages ${_sortIcon(_historySort,'pkg_count')}</th>
+        <th class="sortable" data-col="result" onclick="sortHistory('result')">Result ${_sortIcon(_historySort,'result')}</th>
+        <th class="sortable" data-col="duration_s" onclick="sortHistory('duration_s')">Duration ${_sortIcon(_historySort,'duration_s')}</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="history-tbody">${historyRows(_sortedHistory(_historyRuns))}</tbody>
     </table>`}
   </div>`;
 }
