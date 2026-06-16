@@ -38,9 +38,23 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.9"
 
 CHANGELOG = [
+    {
+        "version": "1.8.9",
+        "date": "2026-06-16",
+        "changes": [
+            "Scheduler now starts before schedules are registered, fixing stale Next Run timestamps after a restart",
+        ],
+    },
+    {
+        "version": "1.8.8",
+        "date": "2026-06-16",
+        "changes": [
+            "Scheduled patch and autoscan jobs no longer silently skip on minor delays: misfire_grace_time raised from APScheduler's 1-second default to 1 hour",
+        ],
+    },
     {
         "version": "1.8.7",
         "date": "2026-06-16",
@@ -334,14 +348,15 @@ def _reload_autoscan_job():
         IntervalTrigger(hours=hours),
         id="autoscan",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     _reload_auth_header()
-    await _reload_all_schedules()
     scheduler.start()
+    await _reload_all_schedules()
     _reload_autoscan_job()
     yield
     scheduler.shutdown(wait=False)
@@ -1466,6 +1481,7 @@ def _register_schedule_job(row: sqlite3.Row):
             id=job_id,
             args=[row["id"], host_ids],
             replace_existing=True,
+            misfire_grace_time=3600,
         )
         job = scheduler.get_job(job_id)
         if job and job.next_run_time:
