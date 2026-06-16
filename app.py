@@ -26,6 +26,7 @@ from typing import Optional
 import paramiko
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -37,9 +38,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.7"
 
 CHANGELOG = [
+    {
+        "version": "1.8.7",
+        "date": "2026-06-16",
+        "changes": [
+            "Autoscan interval setting now actually schedules periodic scans (was previously saved but unused)",
+        ],
+    },
     {
         "version": "1.8.6",
         "date": "2026-06-08",
@@ -310,11 +318,31 @@ def _reload_auth_header():
         _AUTH_HEADER = ""
 
 
+def _reload_autoscan_job():
+    try:
+        db = get_db()
+        row = db.execute("SELECT value FROM settings WHERE key='scan_interval_hours'").fetchone()
+        db.close()
+        hours = int(row["value"]) if row and row["value"] else 12
+    except Exception:
+        hours = 12
+
+    if scheduler.get_job("autoscan"):
+        scheduler.remove_job("autoscan")
+    scheduler.add_job(
+        scan_all,
+        IntervalTrigger(hours=hours),
+        id="autoscan",
+        replace_existing=True,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     _reload_auth_header()
     await _reload_all_schedules()
     scheduler.start()
+    _reload_autoscan_job()
     yield
     scheduler.shutdown(wait=False)
 
@@ -2301,6 +2329,7 @@ def save_settings(body: SettingsPayload):
     db.commit()
     db.close()
     _reload_auth_header()
+    _reload_autoscan_job()
     return {"ok": True}
 
 
