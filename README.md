@@ -19,9 +19,9 @@ A lightweight home server patch manager. SSH into your Linux hosts, check for pe
 - **History** - full patch run logs with per-run output
 - **Notifications** - email (SMTP) and webhook (Telegram, Slack, Discord, ntfy, etc.)
 - **Sudo elevation** - connect as a non-root user; PatchKit wraps privileged commands with sudo automatically (NOPASSWD or password)
+- **Authentication** - optional built-in OpenID Connect login (Authentik, Keycloak, Authelia, etc.) with group restriction, or reverse-proxy forward auth
 - **Mobile** - responsive layout with collapsing sidebar
 - **Supports** apt (Debian, Ubuntu, Raspberry Pi OS) and dnf/rpm (Fedora, Rocky Linux, RHEL, AlmaLinux, CentOS, Nobara)
-- **Forward auth** - optional reverse proxy authentication (Authentik, Authelia, etc.)
 - **Auto-refresh** - dashboard silently updates every 30 seconds
 
 ## Docker
@@ -44,11 +44,15 @@ curl -O https://raw.githubusercontent.com/msmcpeake/patchkit/main/docker-compose
 docker compose up -d
 ```
 
+Open `http://your-server:8080`. PatchKit runs with no authentication out of the box — see [Authentication](#authentication) to lock it down.
+
 ## Requirements
 
 - Python 3.11+
-- SSH key access to your hosts (ed25519 recommended)
+- SSH access to your hosts (ed25519 key recommended)
 - Linux host to run PatchKit on
+
+No third-party auth libraries are needed — OpenID Connect is implemented with the Python standard library.
 
 ## Install
 
@@ -76,7 +80,7 @@ systemctl daemon-reload
 systemctl enable --now patchkit
 ```
 
-Edit `WorkingDirectory` and `ExecStart` in `patchkit.service` if you installed somewhere other than `/opt/patchkit`.
+Edit `WorkingDirectory` and `ExecStart` in `patchkit.service` if you installed somewhere other than `/opt/patchkit`. The unit reads optional environment overrides (including OIDC settings) from `/opt/patchkit/oidc.env` if present — see `oidc.env.example`.
 
 ## SSH credentials
 
@@ -101,25 +105,47 @@ Typical sudoers line for NOPASSWD:
 youruser ALL=(ALL) NOPASSWD: ALL
 ```
 
-## Webhook notifications
+## Authentication
 
-Configure in **Settings -> Webhook**. After every patch run PatchKit POSTs a JSON payload.
+PatchKit ships with **no authentication enabled**. Choose one of the options below, or leave it open on a trusted network.
 
-Available placeholders: `{host}` `{result}` `{result_upper}` `{packages}` `{duration}`
+> **Anyone who can reach port 8080 can manage your hosts.** When you enable proxy-based auth (OIDC redirect handling or forward auth) behind a reverse proxy, also set `PATCHKIT_TRUSTED_PROXIES` so requests that skip the proxy are rejected, and firewall port 8080 to the proxy only.
 
-**Telegram example:**
-```
-URL:      https://api.telegram.org/bot<TOKEN>/sendMessage
-Template: {"chat_id":"<CHAT_ID>","text":"PatchKit: {host} - {result_upper}\n{packages} packages in {duration}s"}
-```
+### OpenID Connect (recommended)
 
-ntfy, Gotify, Slack, and Discord all work the same way.
+Native OIDC login using the Authorization Code flow with PKCE. Works with any compliant provider (Authentik, Keycloak, Authelia, Zitadel, Google, etc.). Sessions are stored server-side and can be revoked; logout is real.
+
+Enable it by setting these environment variables. All four required vars must be present to turn OIDC on — if any is unset, OIDC stays off:
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `PATCHKIT_OIDC_ISSUER` | yes | Issuer / discovery base URL (PatchKit reads `<issuer>/.well-known/openid-configuration`) |
+| `PATCHKIT_OIDC_CLIENT_ID` | yes | OAuth2 client ID |
+| `PATCHKIT_OIDC_CLIENT_SECRET` | yes | OAuth2 client secret (confidential client) |
+| `PATCHKIT_OIDC_REDIRECT_URI` | yes | Must be `https://<your-domain>/auth/callback` |
+| `PATCHKIT_OIDC_REQUIRED_GROUP` | no | If set, only users whose `groups` claim contains this value may log in |
+| `PATCHKIT_OIDC_SCOPES` | no | Space-separated scopes (default `openid email profile`; add `groups` if your provider needs it for the group claim) |
+| `PATCHKIT_SESSION_TTL_HOURS` | no | Session lifetime in hours (default `12`) |
+
+On your identity provider, register a confidential OAuth2/OIDC client:
+
+- **Redirect URI:** `https://<your-domain>/auth/callback`
+- **Grant type:** Authorization Code (with PKCE / S256)
+- **Scopes:** `openid`, `email`, `profile` (plus `groups` if you use `PATCHKIT_OIDC_REQUIRED_GROUP`)
+
+> **Authentik tip:** providers created via the API can have an empty `grant_types`, which makes the login redirect fail with *"Invalid grant_type for provider."* Ensure the provider allows `authorization_code` (and `refresh_token`).
+
+Auth endpoints: `/auth/login`, `/auth/callback`, `/auth/logout`. Unauthenticated browsers are redirected to the provider; API calls get `401`.
+
+### Reverse-proxy forward auth (alternative)
+
+If your proxy already authenticates users (Authentik/Authelia outpost, nginx `auth_request`, Caddy `forward_auth`, etc.), it can inject a trusted identity header instead. Set that header name in **Settings -> Access control** (e.g. `X-Authentik-Username` or `Remote-User`); PatchKit trusts its value as the logged-in user.
+
+Because the header is trusted, you **must** restrict direct access so clients can't set it themselves — set `PATCHKIT_TRUSTED_PROXIES` to your proxy's IP(s) and firewall port 8080. To recover from a lockout, clear the `auth_header` value in the `settings` table with any SQLite client.
 
 ## Reverse proxy
 
-PatchKit listens on port 8080. Put it behind a reverse proxy to handle TLS and (optionally) authentication.
-
-**Important:** PatchKit binds to `0.0.0.0:8080` by default. If this host is internet-facing, firewall port 8080 so it is only reachable via the proxy.
+PatchKit listens on port 8080. Put it behind a reverse proxy to handle TLS. Live patch output uses server-sent events, so disable response buffering.
 
 ### nginx
 
@@ -146,47 +172,6 @@ server {
 }
 ```
 
-### nginx with Authentik forward auth
-
-```nginx
-location /outpost.goauthentik.io {
-    proxy_pass       https://authentik.example.com/outpost.goauthentik.io;
-    proxy_set_header Host $host;
-    proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_pass_request_body off;
-    proxy_set_header Content-Length "";
-    auth_request_set $auth_cookie $upstream_http_set_cookie;
-    add_header       Set-Cookie $auth_cookie;
-}
-
-location / {
-    auth_request  /outpost.goauthentik.io/auth/nginx;
-    error_page 401 = @authentik_signin;
-
-    auth_request_set $ak_user $upstream_http_x_authentik_username;
-    auth_request_set $auth_cookie $upstream_http_set_cookie;
-    add_header       Set-Cookie $auth_cookie;
-    proxy_set_header X-Authentik-Username $ak_user;
-
-    proxy_pass         http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header   Upgrade $http_upgrade;
-    proxy_set_header   Connection "upgrade";
-    proxy_set_header   Host $host;
-    proxy_buffering    off;
-    proxy_read_timeout 300s;
-}
-
-location @authentik_signin {
-    return 302 https://patchkit.example.com/outpost.goauthentik.io/start?rd=$scheme://$host$request_uri;
-}
-```
-
-Then set `X-Authentik-Username` as the auth header in **Settings -> Access control**.
-
 ### Caddy
 
 ```caddy
@@ -199,34 +184,23 @@ patchkit.example.com {
 }
 ```
 
-### Caddy with Authelia forward auth
-
-```caddy
-patchkit.example.com {
-    forward_auth localhost:9091 {
-        uri /api/authz/forward-auth
-        copy_headers Remote-User Remote-Name Remote-Email Remote-Groups
-    }
-
-    reverse_proxy localhost:8080 {
-        transport http {
-            read_buffer 0
-        }
-    }
-}
-```
-
-Then set `Remote-User` as the auth header in **Settings -> Access control**.
-
-## Forward auth
-
-Set a header name in **Settings -> Access control** (e.g. `X-Authentik-Username`). PatchKit trusts the value of that header as the logged-in user identity. Any reverse proxy that injects a trusted header after authentication works (Authentik, Authelia, Caddy, nginx auth_request, etc.).
-
-Configure your proxy before enabling this setting. To recover from a lockout: stop PatchKit, open `patchkit.db` with any SQLite client, and clear the `auth_header` value in the `settings` table.
-
 ## Rolling reboot
 
 Groups support a rolling reboot that reboots hosts one at a time. PatchKit waits for SSH to go down, waits for it to come back, holds a configurable grace period, then rescans to clear the reboot-required flag before moving to the next host. Useful for Kubernetes nodes where you need to maintain cluster quorum.
+
+## Webhook notifications
+
+Configure in **Settings -> Webhook**. After every patch run PatchKit POSTs a JSON payload.
+
+Available placeholders: `{host}` `{result}` `{result_upper}` `{packages}` `{duration}`
+
+**Telegram example:**
+```
+URL:      https://api.telegram.org/bot<TOKEN>/sendMessage
+Template: {"chat_id":"<CHAT_ID>","text":"PatchKit: {host} - {result_upper}\n{packages} packages in {duration}s"}
+```
+
+ntfy, Gotify, Slack, and Discord all work the same way.
 
 ## Stack
 
