@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=patchkit
 WorkingDirectory=/opt/patchkit
+Environment=PATCHKIT_TRUSTED_PROXIES=172.16.100.23,127.0.0.1,::1
 ExecStart=/opt/patchkit/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 

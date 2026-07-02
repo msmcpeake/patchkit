@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import socket
 import sqlite3
 import threading
 import urllib.request
+from urllib.parse import urlparse
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -38,9 +40,23 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.9.0"
 
 CHANGELOG = [
+    {
+        "version": "1.9.0",
+        "date": "2026-07-02",
+        "changes": [
+            "Security: block direct access — requests must arrive via a trusted reverse proxy (PATCHKIT_TRUSTED_PROXIES); prevents spoofing the forward-auth header",
+            "Security: credential API no longer returns private keys or sudo passwords (fingerprint only)",
+            "Security: database and known_hosts files locked to owner-only (0600) at startup",
+            "Security: global sudo password masked in settings API",
+            "Security: HTML-escape all host- and command-derived output in the UI (patch logs, package names, OS names) to prevent XSS from managed hosts",
+            "Security: validate webhook URLs (http/https only; block loopback and link-local targets)",
+            "Security: confine ad-hoc OS-detection key paths to the PatchKit home directory",
+            "Security: host connectivity test no longer returns raw server tracebacks",
+        ],
+    },
     {
         "version": "1.8.9",
         "date": "2026-06-16",
@@ -321,6 +337,37 @@ scheduler = AsyncIOScheduler()
 _AUTH_HEADER: str = ""
 
 
+def _parse_trusted_proxies() -> list:
+    """Networks allowed to reach the app directly (the reverse proxy + loopback).
+
+    Configured via PATCHKIT_TRUSTED_PROXIES (comma-separated IPs or CIDRs).
+    An empty list disables the gate (not recommended)."""
+    raw = os.environ.get("PATCHKIT_TRUSTED_PROXIES", "172.16.100.23,127.0.0.1,::1")
+    nets = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            pass
+    return nets
+
+
+_TRUSTED_PROXIES = _parse_trusted_proxies()
+
+
+def _is_trusted_proxy(ip: str) -> bool:
+    if not _TRUSTED_PROXIES:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _TRUSTED_PROXIES)
+
+
 def _reload_auth_header():
     global _AUTH_HEADER
     try:
@@ -367,6 +414,17 @@ app = FastAPI(title="PatchKit", lifespan=lifespan)
 
 @app.middleware("http")
 async def forward_auth_middleware(request: Request, call_next):
+    # Gate on the real TCP peer (not spoofable headers): only the reverse proxy
+    # may reach the app directly. This prevents bypassing forward auth by hitting
+    # 0.0.0.0:8080 and supplying the auth header yourself.
+    client_ip = request.client.host if request.client else ""
+    if not _is_trusted_proxy(client_ip):
+        return Response(
+            "Forbidden: direct access is not permitted. "
+            "Requests must arrive through the trusted reverse proxy.",
+            status_code=403,
+            media_type="text/plain",
+        )
     if _AUTH_HEADER and not request.headers.get(_AUTH_HEADER):
         return Response(
             "Unauthorized: forward auth header missing. "
@@ -497,8 +555,24 @@ def _migrate_db():
     db.close()
 
 
+def _secure_secret_files():
+    """Restrict files that hold secrets (SSH keys, sudo passwords) to owner-only.
+
+    The DB stores private keys and sudo passwords in the clear; on a shared host a
+    world-readable DB leaks them to every local user."""
+    targets = [DB_PATH, KNOWN_HOSTS,
+               Path(str(DB_PATH) + "-wal"), Path(str(DB_PATH) + "-shm")]
+    for p in targets:
+        try:
+            if Path(p).exists():
+                os.chmod(p, 0o600)
+        except OSError:
+            pass
+
+
 init_db()
 _migrate_db()
+_secure_secret_files()
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +648,15 @@ class CredentialUpdate(BaseModel):
 
 def _expand_key(path: str) -> Path:
     return Path(path).expanduser()
+
+
+def _assert_safe_key_path(path_str: str):
+    """Confine ad-hoc key paths to the PatchKit home dir so an operator can't point
+    the server at arbitrary files elsewhere on disk during OS detection."""
+    resolved = _expand_key(path_str).resolve()
+    home = Path.home().resolve()
+    if resolved != home and home not in resolved.parents:
+        raise HTTPException(400, "Key path must be within the PatchKit home directory")
 
 
 def _load_key(key_path: Path) -> paramiko.PKey:
@@ -1009,8 +1092,29 @@ async def _send_notification(subject: str, body: str):
         print(f"[patchkit] email failed: {e}")
 
 
+def _validate_webhook_url(url: str):
+    """Reject non-HTTP schemes (file://, gopher://, ...) and loopback/link-local
+    targets (e.g. cloud metadata 169.254.169.254). Private LAN ranges are allowed
+    so internal homelab webhooks keep working."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Webhook URL must use http or https")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("Webhook URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 80)
+    except socket.gaierror as e:
+        raise ValueError(f"Cannot resolve webhook host: {e}")
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr.is_loopback or addr.is_link_local:
+            raise ValueError("Webhook URL resolves to a blocked address")
+
+
 def _send_webhook_sync(url: str, template: str, host_name: str,
                        result: str, pkg_count: int, duration: float):
+    _validate_webhook_url(url)
     subs = {
         "{host}":         host_name,
         "{result}":       result,
@@ -1834,6 +1938,9 @@ def get_credential(cid: int):
         raise HTTPException(404, "Credential not found")
     r = dict(row)
     r["fingerprint"] = _key_fingerprint(r.get("ssh_key", ""))
+    # Never expose secret material over the API; the UI only needs the fingerprint.
+    r.pop("ssh_key", None)
+    r.pop("sudo_pass", None)
     return r
 
 
@@ -1996,15 +2103,16 @@ def test_host(host_id: int):
         _, out, _ = client.exec_command("echo ok", timeout=5)
         steps["connect"] = out.read().decode().strip()
         client.close()
-    except Exception:
+    except Exception as e:
         steps["connect"] = "FAILED"
-        steps["error"] = traceback.format_exc()
+        steps["error"] = str(e) or type(e).__name__
     return steps
 
 
 @app.post("/api/detect-os")
 async def detect_os_direct(body: TempHostSpec):
     """Detect OS from connection details without a stored host record."""
+    _assert_safe_key_path(body.ssh_key)
     fake: dict = {"ip": body.ip, "port": body.port, "ssh_user": body.ssh_user,
                   "ssh_key": body.ssh_key, "name": "temp"}
     try:
@@ -2329,18 +2437,33 @@ def delete_schedule(sid: int):
     return {"ok": True}
 
 
+# Secret settings are never returned in the clear; the UI shows a mask and, if the
+# mask comes back unchanged on save, we keep the stored value.
+_MASKED_SETTINGS = {"sudo_pass"}
+_SECRET_MASK = "••••••••"
+
+
 @app.get("/api/settings")
 def get_settings():
     db = get_db()
     rows = db.execute("SELECT key,value FROM settings").fetchall()
     db.close()
-    return {r["key"]: r["value"] for r in rows}
+    out = {}
+    for r in rows:
+        if r["key"] in _MASKED_SETTINGS and (r["value"] or ""):
+            out[r["key"]] = _SECRET_MASK
+        else:
+            out[r["key"]] = r["value"]
+    return out
 
 
 @app.post("/api/settings")
 def save_settings(body: SettingsPayload):
     db = get_db()
     for k, v in body.settings.items():
+        # Leave a masked secret untouched (operator didn't change it).
+        if k in _MASKED_SETTINGS and v == _SECRET_MASK:
+            continue
         db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (k, v))
     db.commit()
     db.close()
