@@ -6,7 +6,16 @@ After=network.target
 Type=simple
 User=patchkit
 WorkingDirectory=/opt/patchkit
+
+# When behind a reverse proxy, restrict direct access to the proxy's IP(s).
+# Leave unset to allow any source (fine for a trusted LAN / no proxy).
 Environment=PATCHKIT_TRUSTED_PROXIES=172.16.100.23,127.0.0.1,::1
+
+# Optional OpenID Connect login. Set these to enable OIDC (see oidc.env.example).
+# With none set, PatchKit runs open, or uses legacy forward auth if an
+# auth_header is configured in Settings.
+EnvironmentFile=-/opt/patchkit/oidc.env
+
 ExecStart=/opt/patchkit/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 

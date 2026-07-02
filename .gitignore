@@ -22,3 +22,8 @@ secrets.yml
 # OS
 .DS_Store
 Thumbs.db
+
+# Host-specific runtime files
+patchkit_known_hosts
+.ssh/
+*.bak.*

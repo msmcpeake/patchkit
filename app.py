@@ -11,16 +11,17 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import smtplib
 import socket
 import sqlite3
 import threading
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode, quote
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
@@ -30,7 +31,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -40,9 +41,19 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 
 CHANGELOG = [
+    {
+        "version": "1.10.0",
+        "date": "2026-07-02",
+        "changes": [
+            "Auth: native OpenID Connect login (Authorization Code + PKCE) with server-side sessions, replacing reverse-proxy forward auth",
+            "Auth: optional group restriction (PATCHKIT_OIDC_REQUIRED_GROUP) and real logout",
+            "Auth: OIDC is fully opt-in via PATCHKIT_OIDC_* env vars — with none set, PatchKit runs open (or with legacy forward auth) and needs no extra dependencies",
+            "Auth: proxy-IP allowlist now defaults to open (set PATCHKIT_TRUSTED_PROXIES when behind a proxy) so fresh installs aren't locked out",
+        ],
+    },
     {
         "version": "1.9.0",
         "date": "2026-07-02",
@@ -341,8 +352,9 @@ def _parse_trusted_proxies() -> list:
     """Networks allowed to reach the app directly (the reverse proxy + loopback).
 
     Configured via PATCHKIT_TRUSTED_PROXIES (comma-separated IPs or CIDRs).
-    An empty list disables the gate (not recommended)."""
-    raw = os.environ.get("PATCHKIT_TRUSTED_PROXIES", "172.16.100.23,127.0.0.1,::1")
+    Unset/empty disables the gate (the default, so a fresh install works with no
+    configuration); set it to your reverse proxy's IP when deploying behind one."""
+    raw = os.environ.get("PATCHKIT_TRUSTED_PROXIES", "")
     nets = []
     for part in raw.split(","):
         part = part.strip()
@@ -366,6 +378,156 @@ def _is_trusted_proxy(ip: str) -> bool:
     except ValueError:
         return False
     return any(addr in net for net in _TRUSTED_PROXIES)
+
+
+# ---------------------------------------------------------------------------
+# OIDC (optional). Activates only when the PATCHKIT_OIDC_* env vars are set.
+# When unset, PatchKit falls back to forward-auth (if an auth_header is set) or
+# open access — so a fresh install needs no auth config and no extra
+# dependencies. The whole flow (Authorization Code + PKCE, confidential client,
+# backchannel token exchange, userinfo for claims) uses only the stdlib.
+# ---------------------------------------------------------------------------
+
+_SESSION_COOKIE = "pk_session"
+
+
+class _OIDCConfig:
+    def __init__(self):
+        self.issuer = os.environ.get("PATCHKIT_OIDC_ISSUER", "").strip().rstrip("/")
+        self.client_id = os.environ.get("PATCHKIT_OIDC_CLIENT_ID", "").strip()
+        self.client_secret = os.environ.get("PATCHKIT_OIDC_CLIENT_SECRET", "").strip()
+        self.redirect_uri = os.environ.get("PATCHKIT_OIDC_REDIRECT_URI", "").strip()
+        self.required_group = os.environ.get("PATCHKIT_OIDC_REQUIRED_GROUP", "").strip()
+        self.scopes = os.environ.get("PATCHKIT_OIDC_SCOPES", "openid email profile").strip()
+        try:
+            self.session_ttl_hours = int(os.environ.get("PATCHKIT_SESSION_TTL_HOURS", "12") or "12")
+        except ValueError:
+            self.session_ttl_hours = 12
+        self.enabled = bool(self.issuer and self.client_id and self.client_secret and self.redirect_uri)
+        self._meta = None
+        self._meta_ts = 0.0
+
+    def metadata(self) -> dict:
+        """Fetch and cache the OIDC discovery document (1h)."""
+        now = time.time()
+        if self._meta and now - self._meta_ts < 3600:
+            return self._meta
+        url = self.issuer + "/.well-known/openid-configuration"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self._meta = json.loads(resp.read().decode())
+            self._meta_ts = now
+        return self._meta
+
+
+_OIDC = _OIDCConfig()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _hash_token(tok: str) -> str:
+    return hashlib.sha256(tok.encode()).hexdigest()
+
+
+def _create_session(claims: dict) -> str:
+    """Persist a server-side session; return the opaque cookie token."""
+    token = secrets.token_urlsafe(32)
+    sid = _hash_token(token)
+    now = _utcnow()
+    expires = now + timedelta(hours=_OIDC.session_ttl_hours)
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO oidc_sessions "
+        "(id, username, email, name, groups, created_at, expires_at, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (sid, claims.get("username", ""), claims.get("email", ""), claims.get("name", ""),
+         json.dumps(claims.get("groups", [])), now.isoformat(), expires.isoformat(), now.isoformat()),
+    )
+    db.commit()
+    db.close()
+    return token
+
+
+def _load_session(request: Request):
+    token = request.cookies.get(_SESSION_COOKIE)
+    if not token:
+        return None
+    sid = _hash_token(token)
+    db = get_db()
+    row = db.execute("SELECT * FROM oidc_sessions WHERE id=?", (sid,)).fetchone()
+    if not row:
+        db.close()
+        return None
+    try:
+        expired = _utcnow() > datetime.fromisoformat(row["expires_at"])
+    except Exception:
+        expired = True
+    if expired:
+        db.execute("DELETE FROM oidc_sessions WHERE id=?", (sid,))
+        db.commit()
+        db.close()
+        return None
+    db.execute("UPDATE oidc_sessions SET last_seen=? WHERE id=?", (_utcnow().isoformat(), sid))
+    db.commit()
+    db.close()
+    return {
+        "user": row["username"],
+        "email": row["email"],
+        "name": row["name"],
+        "groups": json.loads(row["groups"] or "[]"),
+    }
+
+
+def _destroy_session(request: Request):
+    token = request.cookies.get(_SESSION_COOKIE)
+    if not token:
+        return
+    db = get_db()
+    db.execute("DELETE FROM oidc_sessions WHERE id=?", (_hash_token(token),))
+    db.commit()
+    db.close()
+
+
+def _prune_oidc():
+    """Drop expired sessions and stale in-flight login flows."""
+    try:
+        db = get_db()
+        now = _utcnow()
+        db.execute("DELETE FROM oidc_sessions WHERE expires_at < ?", (now.isoformat(),))
+        db.execute("DELETE FROM oidc_flows WHERE created_at < ?",
+                   ((now - timedelta(minutes=15)).isoformat(),))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+def _oidc_token_exchange(meta: dict, code: str, verifier: str) -> dict:
+    data = urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": _OIDC.redirect_uri,
+        "client_id": _OIDC.client_id,
+        "client_secret": _OIDC.client_secret,
+        "code_verifier": verifier,
+    }).encode()
+    req = urllib.request.Request(
+        meta["token_endpoint"], data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _oidc_userinfo(meta: dict, access_token: str) -> dict:
+    req = urllib.request.Request(
+        meta["userinfo_endpoint"],
+        headers={"Authorization": "Bearer " + access_token, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
 
 
 def _reload_auth_header():
@@ -402,6 +564,7 @@ def _reload_autoscan_job():
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     _reload_auth_header()
+    _prune_oidc()
     scheduler.start()
     await _reload_all_schedules()
     _reload_autoscan_job()
@@ -413,10 +576,10 @@ app = FastAPI(title="PatchKit", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def forward_auth_middleware(request: Request, call_next):
+async def auth_middleware(request: Request, call_next):
     # Gate on the real TCP peer (not spoofable headers): only the reverse proxy
-    # may reach the app directly. This prevents bypassing forward auth by hitting
-    # 0.0.0.0:8080 and supplying the auth header yourself.
+    # may reach the app directly. This prevents bypassing auth by hitting
+    # 0.0.0.0:8080 directly. Disabled when PATCHKIT_TRUSTED_PROXIES is unset.
     client_ip = request.client.host if request.client else ""
     if not _is_trusted_proxy(client_ip):
         return Response(
@@ -425,6 +588,26 @@ async def forward_auth_middleware(request: Request, call_next):
             status_code=403,
             media_type="text/plain",
         )
+
+    path = request.url.path
+    # Login/logout endpoints and static assets must be reachable pre-auth.
+    if path.startswith("/auth/") or path.startswith("/static/") or path == "/favicon.ico":
+        return await call_next(request)
+
+    # Preferred: OIDC with server-side sessions (opt-in via env).
+    if _OIDC.enabled:
+        session = _load_session(request)
+        if session is None:
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    {"detail": "authentication required", "login": "/auth/login"},
+                    status_code=401,
+                )
+            return RedirectResponse("/auth/login?next=" + quote(path), status_code=302)
+        request.state.session = session
+        return await call_next(request)
+
+    # Fallback: legacy forward-auth header (only if configured).
     if _AUTH_HEADER and not request.headers.get(_AUTH_HEADER):
         return Response(
             "Unauthorized: forward auth header missing. "
@@ -433,6 +616,107 @@ async def forward_auth_middleware(request: Request, call_next):
             media_type="text/plain",
         )
     return await call_next(request)
+
+
+@app.get("/auth/login")
+def auth_login(request: Request, next: str = "/"):
+    if not _OIDC.enabled:
+        return RedirectResponse("/", status_code=302)
+    # Only allow local, relative return targets (no open redirects).
+    if not next.startswith("/") or next.startswith("//"):
+        next = "/"
+    try:
+        meta = _OIDC.metadata()
+    except Exception:
+        return Response("Login unavailable: identity provider unreachable.",
+                        status_code=502, media_type="text/plain")
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).decode().rstrip("=")
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO oidc_flows (state, code_verifier, nonce, next_url, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (state, verifier, nonce, next, _utcnow().isoformat()),
+    )
+    db.commit()
+    db.close()
+    params = {
+        "response_type": "code",
+        "client_id": _OIDC.client_id,
+        "redirect_uri": _OIDC.redirect_uri,
+        "scope": _OIDC.scopes,
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    return RedirectResponse(meta["authorization_endpoint"] + "?" + urlencode(params), status_code=302)
+
+
+@app.get("/auth/callback")
+def auth_callback(request: Request, code: str = "", state: str = "",
+                  error: str = "", error_description: str = ""):
+    if not _OIDC.enabled:
+        return RedirectResponse("/", status_code=302)
+    if error:
+        return Response(f"Login failed: {error}", status_code=400, media_type="text/plain")
+    db = get_db()
+    row = db.execute("SELECT * FROM oidc_flows WHERE state=?", (state,)).fetchone()
+    if row:
+        db.execute("DELETE FROM oidc_flows WHERE state=?", (state,))
+        db.commit()
+    db.close()
+    if not row or not code:
+        return Response("Login failed: invalid or expired login request.",
+                        status_code=400, media_type="text/plain")
+    try:
+        meta = _OIDC.metadata()
+        tok = _oidc_token_exchange(meta, code, row["code_verifier"])
+        access_token = tok.get("access_token")
+        if not access_token:
+            raise ValueError("no access_token in token response")
+        claims = _oidc_userinfo(meta, access_token)
+    except Exception as e:
+        return Response(f"Login failed: {type(e).__name__}", status_code=502, media_type="text/plain")
+    groups = claims.get("groups") or []
+    if _OIDC.required_group and _OIDC.required_group not in groups:
+        return Response(
+            "Access denied: your account is not a member of the group required to use PatchKit.",
+            status_code=403, media_type="text/plain",
+        )
+    username = (claims.get("preferred_username") or claims.get("nickname")
+                or claims.get("email") or claims.get("sub") or "user")
+    token = _create_session({
+        "username": username,
+        "email": claims.get("email", ""),
+        "name": claims.get("name", ""),
+        "groups": groups,
+    })
+    next_url = row["next_url"] or "/"
+    resp = RedirectResponse(next_url, status_code=303)
+    resp.set_cookie(
+        _SESSION_COOKIE, token, max_age=_OIDC.session_ttl_hours * 3600,
+        httponly=True, secure=True, samesite="lax", path="/",
+    )
+    return resp
+
+
+@app.get("/auth/logout")
+def auth_logout(request: Request):
+    _destroy_session(request)
+    end_session = ""
+    if _OIDC.enabled:
+        try:
+            end_session = _OIDC.metadata().get("end_session_endpoint", "")
+        except Exception:
+            end_session = ""
+    resp = RedirectResponse(end_session or "/", status_code=303)
+    resp.delete_cookie(_SESSION_COOKIE, path="/")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +796,25 @@ def init_db():
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS oidc_sessions (
+            id         TEXT PRIMARY KEY,
+            username   TEXT,
+            email      TEXT,
+            name       TEXT,
+            groups     TEXT,
+            created_at TEXT,
+            expires_at TEXT,
+            last_seen  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS oidc_flows (
+            state         TEXT PRIMARY KEY,
+            code_verifier TEXT,
+            nonce         TEXT,
+            next_url      TEXT,
+            created_at    TEXT
         );
 
         INSERT OR IGNORE INTO settings VALUES ('ssh_key',   '~/.ssh/id_ed25519');
@@ -2496,14 +2799,26 @@ def get_version():
 
 @app.get("/api/me")
 def get_me(request: Request):
-    if not _AUTH_HEADER:
-        return {"enabled": False, "user": None, "name": None, "email": None}
-    return {
-        "enabled": True,
-        "user":  request.headers.get(_AUTH_HEADER, ""),
-        "name":  request.headers.get("X-Authentik-Name", ""),
-        "email": request.headers.get("X-Authentik-Email", ""),
-    }
+    # OIDC session (preferred) — exposes a logout URL to the UI.
+    session = getattr(request.state, "session", None)
+    if session:
+        return {
+            "enabled": True,
+            "user":   session.get("user", ""),
+            "name":   session.get("name", ""),
+            "email":  session.get("email", ""),
+            "logout": "/auth/logout",
+        }
+    # Legacy forward-auth header.
+    if _AUTH_HEADER:
+        return {
+            "enabled": True,
+            "user":   request.headers.get(_AUTH_HEADER, ""),
+            "name":   request.headers.get("X-Authentik-Name", ""),
+            "email":  request.headers.get("X-Authentik-Email", ""),
+            "logout": None,
+        }
+    return {"enabled": False, "user": None, "name": None, "email": None, "logout": None}
 
 
 # ---------------------------------------------------------------------------
