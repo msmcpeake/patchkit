@@ -41,9 +41,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.10.2"
 
 CHANGELOG = [
+    {
+        "version": "1.10.2",
+        "date": "2026-08-02",
+        "changes": [
+            "UI: the patch/reboot output panel can now be minimized to a slim header bar instead of covering the bottom-right of the page for the whole operation",
+        ],
+    },
     {
         "version": "1.10.1",
         "date": "2026-08-02",
