@@ -1005,7 +1005,7 @@ async function updates() {
           ${rebootTag(h)}${secLabel}
         </h3>
         <div class="btn-row" style="flex-shrink:0;margin-left:8px">
-          ${secPkgs.length ? `<button class="btn btn-sm btn-danger" onclick="patchOne(${h.id})"><i class="ti ti-shield-bolt"></i>Patch security</button>` : ''}
+          ${secPkgs.length ? `<button class="btn btn-sm btn-danger" onclick="patchOne(${h.id}, true)"><i class="ti ti-shield-bolt"></i>Patch security</button>` : ''}
           <button class="btn btn-sm btn-primary" onclick="patchOne(${h.id})"><i class="ti ti-bolt"></i>Patch all</button>
         </div>
       </div>
@@ -1398,9 +1398,9 @@ async function scanAll() {
   render();
 }
 
-function patchOne(id) {
+function patchOne(id, securityOnly = false) {
   S.patching.add(id);
-  streamPatch(`/api/hosts/${id}/patch`, id);
+  streamPatch(`/api/hosts/${id}/patch${securityOnly ? '?security_only=1' : ''}`, id);
 }
 
 function patchAll() {

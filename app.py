@@ -41,9 +41,18 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 
 CHANGELOG = [
+    {
+        "version": "1.10.1",
+        "date": "2026-08-02",
+        "changes": [
+            "Fix: \"Patch security\" button applied all pending updates instead of security-only ones — it was wired to the same handler as \"Patch all\"",
+            "Patching a single host now supports a security-only mode: APT installs only packages flagged is_security, DNF uses `dnf upgrade --security`",
+            "Nobara hosts now warn and skip rather than silently running a full sync when security-only patching is requested (nobara-sync has no security filter)",
+        ],
+    },
     {
         "version": "1.10.0",
         "date": "2026-07-02",
@@ -1623,7 +1632,7 @@ async def scan_host_async(host_id: int) -> dict:
 # Patch logic (streaming SSE)
 # ---------------------------------------------------------------------------
 
-async def patch_host_stream(host_id: int):
+async def patch_host_stream(host_id: int, security_only: bool = False):
     """Yields SSE lines while patching. Enforces per-host lock file."""
     if not _acquire_lock(host_id):
         yield "data: error|Host is already being patched (lock active)\n\n"
@@ -1709,6 +1718,8 @@ async def patch_host_stream(host_id: int):
                 None, lambda: ssh_run(client, "apt list --upgradeable 2>/dev/null", 30, sudo_pass=sudo_pass)
             )
             pkgs = parse_upgradeable(out)
+            if security_only:
+                pkgs = [p for p in pkgs if p.get("is_security")]
         else:  # dnf: check-update refreshes metadata and lists in one shot
             yield emit("Running dnf check-update...")
             _, upd_out, _ = await loop.run_in_executor(
@@ -1719,6 +1730,16 @@ async def patch_host_stream(host_id: int):
                     "rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null", 30, sudo_pass=sudo_pass)
             )
             pkgs = parse_dnf_upgradeable(upd_out, inst_out)
+            if security_only:
+                if "nobara" in (os_detected or "").lower():
+                    yield emit("Nobara doesn't support security-only patching (nobara-sync has no security filter) — skipping", "warn")
+                    pkgs = []
+                else:
+                    _, sec_out, _ = await loop.run_in_executor(
+                        None, lambda: ssh_run(client, "dnf updateinfo list security --quiet 2>&1; exit 0", 30, sudo_pass=sudo_pass)
+                    )
+                    sec_names = parse_dnf_security_pkgnames(sec_out)
+                    pkgs = [p for p in pkgs if p["name"] in sec_names]
 
         pkg_count = len(pkgs)
 
@@ -1731,10 +1752,17 @@ async def patch_host_stream(host_id: int):
                 yield emit(f"  {p['name']}: {p['from']} → {p['to']}", "pkg")
 
             if pkg_mgr == 'apt':
-                upgrade_cmd = (
-                    "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y "
-                    "-o Dpkg::Options::='--force-confold' 2>&1"
-                )
+                if security_only:
+                    pkg_names = " ".join(shlex.quote(p["name"]) for p in pkgs)
+                    upgrade_cmd = (
+                        f"DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y {pkg_names} "
+                        "-o Dpkg::Options::='--force-confold' 2>&1"
+                    )
+                else:
+                    upgrade_cmd = (
+                        "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y "
+                        "-o Dpkg::Options::='--force-confold' 2>&1"
+                    )
                 autoremove_cmd = "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1"
                 clean_cmd      = "apt-get clean 2>&1"
             else:
@@ -1742,7 +1770,8 @@ async def patch_host_stream(host_id: int):
                     upgrade_cmd = "nobara-sync cli 2>&1"
                 else:
                     excl_flags = " ".join(f"--exclude={shlex.quote(p)}" for p in excluded) if excluded else ""
-                    upgrade_cmd = f"dnf upgrade -y {excl_flags} 2>&1".strip()
+                    sec_flag = "--security " if security_only else ""
+                    upgrade_cmd = f"dnf upgrade -y {sec_flag}{excl_flags} 2>&1".strip()
                 autoremove_cmd = "dnf autoremove -y 2>&1"
                 clean_cmd      = "dnf clean all 2>&1"
 
@@ -2621,9 +2650,9 @@ async def scan_all():
 
 
 @app.get("/api/hosts/{host_id}/patch")
-async def patch_host(host_id: int):
+async def patch_host(host_id: int, security_only: bool = False):
     return StreamingResponse(
-        patch_host_stream(host_id),
+        patch_host_stream(host_id, security_only=security_only),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
