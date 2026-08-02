@@ -41,9 +41,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.10.2"
+APP_VERSION = "1.10.3"
 
 CHANGELOG = [
+    {
+        "version": "1.10.3",
+        "date": "2026-08-02",
+        "changes": [
+            "Fix: patch logs showed huge blocks of repeated text from progress-bar redraws (apt percentages, needrestart's scan bars, dpkg's \"Reading database...\" counter) — carriage-return redraws are now collapsed to their final frame instead of all being crammed onto one line",
+        ],
+    },
     {
         "version": "1.10.2",
         "date": "2026-08-02",
@@ -1369,6 +1376,10 @@ async def _stream_cmd(client: paramiko.SSHClient, cmd: str, timeout: int, classi
         buf += chunk
         while b"\n" in buf:
             line_b, buf = buf.split(b"\n", 1)
+            if b"\r" in line_b:
+                # Progress-bar redraws (apt, needrestart, dpkg) use \r to overwrite the
+                # same terminal line; keep only the final redraw, like a real terminal would show.
+                line_b = line_b.rsplit(b"\r", 1)[1]
             line = _strip_ansi(line_b.decode(errors="replace")).strip()
             if line:
                 yield line, classify(line)
