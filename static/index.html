@@ -169,10 +169,12 @@ tr:hover td{background:var(--bg)}
   table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
   .schedule-card-right{width:100%}
   #op-panel{right:8px!important;left:8px!important;width:auto!important;height:320px!important}
+  #op-panel.op-panel-min{height:auto!important}
   #op-panel-list{width:140px!important}
   .modal{width:calc(100vw - 32px);padding:16px}
   .modal-bg{padding:0 16px}
 }
+#op-panel.op-panel-min{width:300px!important;height:auto!important}
 </style>
 </head>
 <body>
@@ -1127,6 +1129,7 @@ function patchGroup(tag) {
 // ---- Unified operation panel ----
 let _opState = {};
 let _opSelected = null;
+let _opMinimized = false;
 
 function _getOpPanel() {
   let panel = document.getElementById('op-panel');
@@ -1135,16 +1138,35 @@ function _getOpPanel() {
   panel.id = 'op-panel';
   panel.style.cssText = 'position:fixed;bottom:24px;right:24px;width:640px;max-width:calc(100vw - 16px);height:360px;z-index:200;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 4px 32px rgba(0,0,0,.22);overflow:hidden';
   panel.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0">
+    <div onclick="_opMinimized && _toggleOpMinimize()" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;cursor:${_opMinimized ? 'pointer' : 'default'}">
       <span id="op-panel-title" style="font-size:13px;font-weight:600"></span>
-      <button onclick="_closeOpPanel()" title="Dismiss" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px;padding:2px 4px;line-height:1"><i class="ti ti-x"></i></button>
+      <span style="display:flex;align-items:center;gap:2px">
+        <button onclick="event.stopPropagation();_toggleOpMinimize()" title="${_opMinimized ? 'Expand' : 'Minimize'}" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px;padding:2px 4px;line-height:1"><i id="op-panel-min-icon" class="ti ti-${_opMinimized ? 'chevron-up' : 'chevron-down'}"></i></button>
+        <button onclick="event.stopPropagation();_closeOpPanel()" title="Dismiss" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px;padding:2px 4px;line-height:1"><i class="ti ti-x"></i></button>
+      </span>
     </div>
-    <div style="display:flex;flex:1;min-height:0">
+    <div id="op-panel-body" style="display:${_opMinimized ? 'none' : 'flex'};flex:1;min-height:0">
       <div id="op-panel-list" style="width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto"></div>
       <div id="op-panel-log" class="log-box" style="flex:1;border-radius:0;margin:0;max-height:none"></div>
     </div>`;
+  panel.classList.toggle('op-panel-min', _opMinimized);
   document.body.appendChild(panel);
   return panel;
+}
+
+function _toggleOpMinimize() {
+  _opMinimized = !_opMinimized;
+  const panel = document.getElementById('op-panel');
+  if (!panel) return;
+  panel.classList.toggle('op-panel-min', _opMinimized);
+  const header = panel.firstElementChild;
+  if (header) header.style.cursor = _opMinimized ? 'pointer' : 'default';
+  const body = document.getElementById('op-panel-body');
+  if (body) body.style.display = _opMinimized ? 'none' : 'flex';
+  const minIcon = document.getElementById('op-panel-min-icon');
+  if (minIcon) minIcon.className = `ti ti-${_opMinimized ? 'chevron-up' : 'chevron-down'}`;
+  const minBtn = minIcon ? minIcon.closest('button') : null;
+  if (minBtn) minBtn.title = _opMinimized ? 'Expand' : 'Minimize';
 }
 
 function _closeOpPanel() {
@@ -1154,6 +1176,7 @@ function _closeOpPanel() {
   if (panel) panel.remove();
   _opState = {};
   _opSelected = null;
+  _opMinimized = false;
 }
 
 function _renderOpPanel() {
