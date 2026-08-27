@@ -41,9 +41,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.10.3"
+APP_VERSION = "1.11.0"
 
 CHANGELOG = [
+    {
+        "version": "1.11.0",
+        "date": "2026-08-27",
+        "changes": [
+            "Patching multiple hosts (group patch, patch all, or a scheduled run) now sends one combined notification and webhook covering all hosts instead of one per host",
+        ],
+    },
     {
         "version": "1.10.3",
         "date": "2026-08-02",
@@ -1490,6 +1497,80 @@ async def _send_webhook(host_name: str, result: str, pkg_count: int, duration: f
         print(f"[patchkit] webhook failed: {e}")
 
 
+def _batch_summary(results: list[dict]):
+    ok = sum(1 for r in results if r["result"] == "ok")
+    warn = sum(1 for r in results if r["result"] == "warn")
+    error = sum(1 for r in results if r["result"] == "error")
+    overall = "error" if error else "warn" if warn else "ok"
+    total_pkgs = sum(r["packages"] for r in results)
+    total_duration = round(sum(r["duration"] for r in results), 1)
+    return ok, warn, error, overall, total_pkgs, total_duration
+
+
+async def _send_batch_notification(results: list[dict]):
+    if not results:
+        return
+    ok, warn, error, overall, total_pkgs, total_duration = _batch_summary(results)
+    lines = [f"{r['host']}: {r['result']} - {r['packages']} package(s), {r['duration']}s" for r in results]
+    body = (
+        f"Hosts patched: {len(results)} ({ok} ok, {warn} warn, {error} error)\n"
+        f"Total packages upgraded: {total_pkgs}\nTotal duration: {total_duration}s\n\n"
+        + "\n".join(lines)
+    )
+    await _send_notification(f"PatchKit: {len(results)} host(s) patched - {overall.upper()}", body)
+
+
+def _send_batch_webhook_sync(url: str, template: str, results: list[dict]):
+    _validate_webhook_url(url)
+    ok, warn, error, overall, total_pkgs, total_duration = _batch_summary(results)
+    host_list = ", ".join(r["host"] for r in results)
+    subs = {
+        "{host}":         host_list,
+        "{result}":       overall,
+        "{result_upper}": overall.upper(),
+        "{packages}":     str(total_pkgs),
+        "{duration}":     str(total_duration),
+    }
+    if template:
+        body_str = template
+        for k, v in subs.items():
+            body_str = body_str.replace(k, v)
+        payload = body_str.encode()
+    else:
+        payload = json.dumps({
+            "title":      f"PatchKit: {len(results)} host(s) - {overall.upper()}",
+            "message":    f"{ok} ok, {warn} warn, {error} error - {total_pkgs} package(s) upgraded",
+            "hosts":      results,
+            "result":     overall,
+            "packages":   total_pkgs,
+            "duration_s": total_duration,
+        }).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "PatchKit/1.0"},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=10)
+
+
+async def _send_batch_webhook(results: list[dict]):
+    if not results:
+        return
+    db = get_db()
+    cfg = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
+    db.close()
+    url      = cfg.get("webhook_url", "").strip()
+    template = cfg.get("webhook_template", "").strip()
+    if not url:
+        return
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _send_batch_webhook_sync(url, template, results)
+        )
+    except Exception as e:
+        print(f"[patchkit] batch webhook failed: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Patch lock file (per-host)
 # ---------------------------------------------------------------------------
@@ -1650,7 +1731,7 @@ async def scan_host_async(host_id: int) -> dict:
 # Patch logic (streaming SSE)
 # ---------------------------------------------------------------------------
 
-async def patch_host_stream(host_id: int, security_only: bool = False):
+async def patch_host_stream(host_id: int, security_only: bool = False, notify: bool = True, results: list | None = None):
     """Yields SSE lines while patching. Enforces per-host lock file."""
     if not _acquire_lock(host_id):
         yield "data: error|Host is already being patched (lock active)\n\n"
@@ -1882,12 +1963,16 @@ async def patch_host_stream(host_id: int, security_only: bool = False):
     db.close()
     yield emit(f"Done in {duration}s", "done")
 
-    await _send_notification(
-        f"PatchKit: {host_name} - {run_result.upper()}",
-        f"Host: {host_name}\nResult: {run_result}\nPackages upgraded: {pkg_count}\n"
-        f"Duration: {duration}s\n\nLog:\n" + "\n".join(log_lines),
-    )
-    await _send_webhook(host_name, run_result, pkg_count, duration)
+    if results is not None:
+        results.append({"host": host_name, "result": run_result, "packages": pkg_count, "duration": duration})
+
+    if notify:
+        await _send_notification(
+            f"PatchKit: {host_name} - {run_result.upper()}",
+            f"Host: {host_name}\nResult: {run_result}\nPackages upgraded: {pkg_count}\n"
+            f"Duration: {duration}s\n\nLog:\n" + "\n".join(log_lines),
+        )
+        await _send_webhook(host_name, run_result, pkg_count, duration)
 
     if run_result != "error":
         yield emit("Rescanning to verify...", "info")
@@ -1964,11 +2049,15 @@ async def _run_scheduled_patch(schedule_id: int, host_ids: list[int]):
     if not host_ids:
         host_ids = [r["id"] for r in db.execute("SELECT id FROM hosts WHERE enabled=1")]
     db.close()
+    results: list[dict] = []
+
     async def _drain(hid: int):
-        async for _ in patch_host_stream(hid):
+        async for _ in patch_host_stream(hid, notify=False, results=results):
             pass
 
     await asyncio.gather(*[_drain(hid) for hid in host_ids])
+    await _send_batch_notification(results)
+    await _send_batch_webhook(results)
     job = scheduler.get_job(f"sched_{schedule_id}")
     if job and job.next_run_time:
         db2 = get_db()
@@ -2162,9 +2251,12 @@ async def patch_group_stream(tag: str):
     ids = _hosts_for_tag(tag)
 
     async def combined():
+        results: list[dict] = []
         for hid in ids:
-            async for chunk in patch_host_stream(hid):
+            async for chunk in patch_host_stream(hid, notify=False, results=results):
                 yield chunk
+        await _send_batch_notification(results)
+        await _send_batch_webhook(results)
 
     return StreamingResponse(
         combined(),
@@ -2683,9 +2775,12 @@ async def patch_all():
     db.close()
 
     async def combined():
+        results: list[dict] = []
         for hid in ids:
-            async for chunk in patch_host_stream(hid):
+            async for chunk in patch_host_stream(hid, notify=False, results=results):
                 yield chunk
+        await _send_batch_notification(results)
+        await _send_batch_webhook(results)
 
     return StreamingResponse(
         combined(),
