@@ -41,9 +41,16 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 
 CHANGELOG = [
+    {
+        "version": "1.11.1",
+        "date": "2026-08-28",
+        "changes": [
+            "Fix: group patch, patch all, and patch-all-groups buttons still sent one notification per host - the 1.11.0 batching only covered the scheduler and two unused API endpoints, not the buttons the UI actually calls. Those buttons now tag their per-host requests with a shared batch id so the last host to finish sends one combined notification",
+        ],
+    },
     {
         "version": "1.11.0",
         "date": "2026-08-27",
@@ -1572,6 +1579,15 @@ async def _send_batch_webhook(results: list[dict]):
 
 
 # ---------------------------------------------------------------------------
+# Client-initiated patch batches (browser fires N parallel per-host SSE
+# streams for a group/all patch; they share a batch id so the last one to
+# finish sends a single combined notification instead of N individual ones)
+# ---------------------------------------------------------------------------
+
+_patch_batches: dict[str, list[dict]] = {}
+
+
+# ---------------------------------------------------------------------------
 # Patch lock file (per-host)
 # ---------------------------------------------------------------------------
 
@@ -1731,7 +1747,8 @@ async def scan_host_async(host_id: int) -> dict:
 # Patch logic (streaming SSE)
 # ---------------------------------------------------------------------------
 
-async def patch_host_stream(host_id: int, security_only: bool = False, notify: bool = True, results: list | None = None):
+async def patch_host_stream(host_id: int, security_only: bool = False, notify: bool = True, results: list | None = None,
+                             batch_id: str | None = None, batch_size: int = 0):
     """Yields SSE lines while patching. Enforces per-host lock file."""
     if not _acquire_lock(host_id):
         yield "data: error|Host is already being patched (lock active)\n\n"
@@ -1966,7 +1983,14 @@ async def patch_host_stream(host_id: int, security_only: bool = False, notify: b
     if results is not None:
         results.append({"host": host_name, "result": run_result, "packages": pkg_count, "duration": duration})
 
-    if notify:
+    if batch_id:
+        batch = _patch_batches.setdefault(batch_id, [])
+        batch.append({"host": host_name, "result": run_result, "packages": pkg_count, "duration": duration})
+        if len(batch) >= batch_size:
+            complete = _patch_batches.pop(batch_id, batch)
+            await _send_batch_notification(complete)
+            await _send_batch_webhook(complete)
+    elif notify:
         await _send_notification(
             f"PatchKit: {host_name} - {run_result.upper()}",
             f"Host: {host_name}\nResult: {run_result}\nPackages upgraded: {pkg_count}\n"
@@ -2760,9 +2784,9 @@ async def scan_all():
 
 
 @app.get("/api/hosts/{host_id}/patch")
-async def patch_host(host_id: int, security_only: bool = False):
+async def patch_host(host_id: int, security_only: bool = False, batch: str | None = None, batch_size: int = 0):
     return StreamingResponse(
-        patch_host_stream(host_id, security_only=security_only),
+        patch_host_stream(host_id, security_only=security_only, batch_id=batch, batch_size=batch_size),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

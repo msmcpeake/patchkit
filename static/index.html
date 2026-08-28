@@ -1117,13 +1117,18 @@ async function scanGroup(tag) {
   render();
 }
 
+function newBatchId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
 function patchGroup(tag) {
   const ids = S.hosts
     .filter(h => hostTagList(h).includes(tag) && h.scan && h.scan.pkg_count > 0)
     .map(h => h.id);
   if (!ids.length) { showToast(`Group "${tag}" is up to date`); return; }
   ids.forEach(id => S.patching.add(id));
-  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
+  const batch = newBatchId();
+  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch?batch=${batch}&batch_size=${ids.length}`, id));
 }
 
 // ---- Unified operation panel ----
@@ -1264,7 +1269,8 @@ function patchAllGroups() {
     .map(h => h.id);
   if (!ids.length) { showToast('All groups are up to date'); return; }
   ids.forEach(id => S.patching.add(id));
-  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch`, id));
+  const batch = newBatchId();
+  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch?batch=${batch}&batch_size=${ids.length}`, id));
 }
 
 // --- Schedule page ---
@@ -1433,7 +1439,8 @@ function patchAll() {
   const lines = hosts.map(h => `  ${h.name}  (${h.scan.pkg_count} package${h.scan.pkg_count > 1 ? 's' : ''})`).join('\n');
   if (!confirm(`Patch ${hosts.length} host${hosts.length > 1 ? 's' : ''} - ${totalPkgs} package${totalPkgs > 1 ? 's' : ''} total?\n\n${lines}`)) return;
   hosts.forEach(h => S.patching.add(h.id));
-  hosts.forEach(h => streamPatch(`/api/hosts/${h.id}/patch`, h.id));
+  const batch = newBatchId();
+  hosts.forEach(h => streamPatch(`/api/hosts/${h.id}/patch?batch=${batch}&batch_size=${hosts.length}`, h.id));
 }
 
 function streamReboot(hostId, hostName) {
