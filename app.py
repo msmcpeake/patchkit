@@ -18,6 +18,7 @@ import socket
 import sqlite3
 import threading
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, urlencode, quote
 import time
 from contextlib import asynccontextmanager
@@ -41,9 +42,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.11.2"
 
 CHANGELOG = [
+    {
+        "version": "1.11.2",
+        "date": "2026-09-06",
+        "changes": [
+            "Fix: patching multiple hosts at once could stall indefinitely once a host's upgrade included a kernel package - dracut/update-initramfs can run for minutes with no output, and every host's blocking SSH I/O shared Python's default thread pool, so a couple of slow kernel upgrades could starve unrelated hosts of a worker thread even after those hosts had already finished. Dedicated thread pool for SSH I/O now sized well above any realistic concurrent-host count",
+            "Raised the upgrade command's idle-output timeout from 300s to 1800s so a legitimately slow, silent kernel upgrade no longer gets killed as a false-positive timeout",
+        ],
+    },
     {
         "version": "1.11.1",
         "date": "2026-08-28",
@@ -379,6 +388,11 @@ CHANGELOG = [
 # Semaphore limits concurrent SSH scans to 5
 _SCAN_SEM = asyncio.Semaphore(5)
 
+# Dedicated pool for blocking SSH I/O (paramiko). Sized well above any realistic
+# concurrent-host count so a slow host (e.g. one rebuilding an initramfs) can't
+# starve unrelated hosts of a worker thread in the same "patch all" batch.
+_SSH_EXECUTOR = ThreadPoolExecutor(max_workers=64, thread_name_prefix="ssh-io")
+
 scheduler = AsyncIOScheduler()
 
 
@@ -600,6 +614,7 @@ def _reload_autoscan_job():
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
+    asyncio.get_event_loop().set_default_executor(_SSH_EXECUTOR)
     _reload_auth_header()
     _prune_oidc()
     scheduler.start()
@@ -1893,7 +1908,10 @@ async def patch_host_stream(host_id: int, security_only: bool = False, notify: b
 
             yield emit("Applying upgrades...")
             upgrade_rc = None
-            async for line, lv in _stream_cmd(client, upgrade_cmd, 300, classify, sudo_pass=sudo_pass):
+            # Kernel packages trigger initramfs rebuilds (dracut/update-initramfs) that can
+            # legitimately produce no output for several minutes; 300s was too tight and
+            # caused false-positive timeouts on otherwise-healthy upgrades.
+            async for line, lv in _stream_cmd(client, upgrade_cmd, 1800, classify, sudo_pass=sudo_pass):
                 if line == "__EXIT__":
                     upgrade_rc = int(lv)
                 else:
