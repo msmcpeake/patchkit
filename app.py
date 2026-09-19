@@ -42,9 +42,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.11.3"
 
 CHANGELOG = [
+    {
+        "version": "1.11.3",
+        "date": "2026-09-19",
+        "changes": [
+            "Fix: hosts still waiting to start in a large \"patch all\"/group patch run could get marked as failed (red) even though they never actually started. The UI was opening one EventSource per host all at once, which past the browser's per-origin connection limit just queues silently client-side with no server-side trace - if that queue outlived the page (navigation, tab GC, etc.) every still-queued connection errored out at once. Patch runs now cap concurrent host streams at 5 and queue the rest explicitly instead of relying on the browser's own connection queue",
+            "Also enabled HTTP/2 on the patchkit.craftway.net reverse proxy, which multiplexes multiple EventSource streams over one connection and removes the browser's 6-connection-per-origin cap as a contributing factor",
+        ],
+    },
     {
         "version": "1.11.2",
         "date": "2026-09-06",

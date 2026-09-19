@@ -1128,7 +1128,7 @@ function patchGroup(tag) {
   if (!ids.length) { showToast(`Group "${tag}" is up to date`); return; }
   ids.forEach(id => S.patching.add(id));
   const batch = newBatchId();
-  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch?batch=${batch}&batch_size=${ids.length}`, id));
+  streamPatchQueued(ids, { batch });
 }
 
 // ---- Unified operation panel ----
@@ -1270,7 +1270,7 @@ function patchAllGroups() {
   if (!ids.length) { showToast('All groups are up to date'); return; }
   ids.forEach(id => S.patching.add(id));
   const batch = newBatchId();
-  ids.forEach(id => streamPatch(`/api/hosts/${id}/patch?batch=${batch}&batch_size=${ids.length}`, id));
+  streamPatchQueued(ids, { batch });
 }
 
 // --- Schedule page ---
@@ -1429,7 +1429,7 @@ async function scanAll() {
 
 function patchOne(id, securityOnly = false) {
   S.patching.add(id);
-  streamPatch(`/api/hosts/${id}/patch${securityOnly ? '?security_only=1' : ''}`, id);
+  streamPatch(id, { securityOnly });
 }
 
 function patchAll() {
@@ -1440,7 +1440,7 @@ function patchAll() {
   if (!confirm(`Patch ${hosts.length} host${hosts.length > 1 ? 's' : ''} - ${totalPkgs} package${totalPkgs > 1 ? 's' : ''} total?\n\n${lines}`)) return;
   hosts.forEach(h => S.patching.add(h.id));
   const batch = newBatchId();
-  hosts.forEach(h => streamPatch(`/api/hosts/${h.id}/patch?batch=${batch}&batch_size=${hosts.length}`, h.id));
+  streamPatchQueued(hosts.map(h => h.id), { batch });
 }
 
 function streamReboot(hostId, hostName) {
@@ -1625,30 +1625,54 @@ async function saveSchedule() {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
-function streamPatch(url, hostId, remaining = []) {
+function streamPatch(hostId, opts = {}) {
+  const { batch = null, batchSize = 0, securityOnly = false, remaining = [] } = opts;
   const h = S.hosts.find(x => x.id === hostId);
   const key = 'patch-' + hostId;
   _opStart(key, h ? h.name : 'host ' + hostId);
-  const es = new EventSource(url);
+  const params = new URLSearchParams();
+  if (securityOnly) params.set('security_only', '1');
+  if (batch) { params.set('batch', batch); params.set('batch_size', batchSize); }
+  const qs = params.toString();
+  const es = new EventSource(`/api/hosts/${hostId}/patch${qs ? '?' + qs : ''}`);
+  const advance = () => {
+    if (remaining.length > 0) {
+      const next = remaining[0];
+      streamPatch(next, { batch, batchSize, securityOnly, remaining: remaining.slice(1) });
+    }
+  };
   es.onmessage = e => {
     if (e.data === 'DONE') {
       es.close();
       S.patching.delete(hostId);
       _opDone(key, 'ok');
       loadHosts().then(() => {
-        if (remaining.length > 0) {
-          const next = remaining[0];
-          streamPatch(`/api/hosts/${next}/patch`, next, remaining.slice(1));
-        } else {
-          render();
-        }
+        if (remaining.length > 0) advance();
+        else render();
       });
       return;
     }
     const [level, ...rest] = e.data.split('|');
     _opLine(key, level || 'info', rest.join('|'));
   };
-  es.onerror = () => { es.close(); S.patching.delete(hostId); _opDone(key, 'error'); };
+  es.onerror = () => { es.close(); S.patching.delete(hostId); _opDone(key, 'error'); advance(); };
+}
+
+// Patches many hosts with a bounded number of concurrent EventSource
+// connections instead of opening one per host at once (which used to run
+// into the browser's per-origin connection cap and left the overflow
+// silently queued client-side until it errored out on navigation/GC).
+const PATCH_CONCURRENCY = 5;
+function streamPatchQueued(ids, opts = {}) {
+  if (!ids.length) return;
+  const { batch = null, securityOnly = false } = opts;
+  const batchSize = batch ? ids.length : 0;
+  const lanes = Math.min(PATCH_CONCURRENCY, ids.length);
+  for (let i = 0; i < lanes; i++) {
+    const laneIds = ids.filter((_, idx) => idx % lanes === i);
+    const [first, ...rest] = laneIds;
+    streamPatch(first, { batch, batchSize, securityOnly, remaining: rest });
+  }
 }
 
 async function detectOsNew() {
