@@ -31,7 +31,7 @@ import paramiko
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -42,9 +42,19 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.12.0"
 
 CHANGELOG = [
+    {
+        "version": "1.12.0",
+        "date": "2026-10-01",
+        "changes": [
+            "Fix: \"patch all\"/group runs that seemed to time out. The real cause was patching the host that runs the reverse proxy: its docker-ce upgrade restarts the proxy container, which dropped every open patch stream. The patch work ran inside that HTTP stream, so a dropped connection cancelled it mid-run, leaving the run unfinished in History with an empty log and its SSH connection leaked. The UI then treated every remaining queued host as failed within a second, without starting them",
+            "Patches now run as server-side background jobs that a browser connection only follows. The UI reconnects after a dropped stream and resumes the log from where it left off, and the next queued host only starts once the current one has really finished",
+            "A patch interrupted by PatchKit itself shutting down is now still recorded in History as an error with its log, and its SSH connection is always closed",
+            "Patch streams send a keepalive every 15s so silent stretches (kernel/initramfs rebuilds) don't look idle to proxies",
+        ],
+    },
     {
         "version": "1.11.3",
         "date": "2026-09-19",
@@ -630,6 +640,10 @@ async def lifespan(app_: FastAPI):
     _reload_autoscan_job()
     yield
     scheduler.shutdown(wait=False)
+    running = [j.task for j in _patch_jobs.values() if not j.done]
+    for t in running:
+        t.cancel()
+    await asyncio.gather(*running, return_exceptions=True)
 
 
 app = FastAPI(title="PatchKit", lifespan=lifespan)
@@ -1611,6 +1625,65 @@ _patch_batches: dict[str, list[dict]] = {}
 
 
 # ---------------------------------------------------------------------------
+# Detached patch jobs. The patch itself runs as a server-side task; the SSE
+# endpoint only follows its buffered output. A dropped browser connection
+# (e.g. patching the host that runs the reverse proxy restarts it) no longer
+# cancels the patch, and the client reconnects and resumes from its last event.
+# ---------------------------------------------------------------------------
+
+_JOB_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_JOB_RETAIN_S = 900
+_SSE_KEEPALIVE_S = 15
+
+
+class _PatchJob:
+    def __init__(self, key: str, gen):
+        self.key = key
+        self.chunks: list[str] = []
+        self.done = False
+        self._wake = asyncio.Event()
+        self.task = asyncio.create_task(self._run(gen))
+
+    def _push(self, chunk: str):
+        self.chunks.append(chunk)
+        wake, self._wake = self._wake, asyncio.Event()
+        wake.set()
+
+    async def _run(self, gen):
+        try:
+            async for chunk in gen:
+                self._push(chunk)
+        except asyncio.CancelledError:
+            self._push("data: error|Patch interrupted (PatchKit shutting down)\n\n")
+            self._push("data: DONE\n\n")
+            raise
+        except Exception as e:
+            self._push(f"data: error|Patch task failed: {e}\n\n")
+            self._push("data: DONE\n\n")
+        finally:
+            self.done = True
+            self._wake.set()
+            asyncio.get_event_loop().call_later(_JOB_RETAIN_S, _patch_jobs.pop, self.key, None)
+
+    async def follow(self, start: int):
+        i = max(start, 0)
+        while True:
+            while i < len(self.chunks):
+                yield f"id: {i}\n{self.chunks[i]}"
+                i += 1
+            if self.done:
+                return
+            wake = self._wake
+            try:
+                await asyncio.wait_for(wake.wait(), _SSE_KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+
+
+_patch_jobs: dict[str, _PatchJob] = {}
+
+
+# ---------------------------------------------------------------------------
 # Patch lock file (per-host)
 # ---------------------------------------------------------------------------
 
@@ -1808,17 +1881,28 @@ async def patch_host_stream(host_id: int, security_only: bool = False, notify: b
         log_lines.append(line)
         return f"data: {level}|{line}\n\n"
 
-    if defaults.get("scan_before_patch") == "1":
-        yield emit("Pre-scan: refreshing package list...")
-        try:
-            await scan_host_async(host_id)
-            yield emit("Pre-scan complete", "ok")
-        except Exception as e:
-            yield emit(f"Pre-scan failed (continuing): {e}", "warn")
+    def finalize() -> float:
+        duration = round(time.time() - t0, 1)
+        db.execute(
+            """UPDATE patch_runs SET finished_at=datetime('now'), pkg_count=?, result=?, duration_s=?, log=?
+               WHERE id=?""",
+            (pkg_count, run_result, duration, "\n".join(log_lines), run_id),
+        )
+        db.commit()
+        db.close()
+        return duration
 
-    yield emit(f"Connecting to {host_name} ({row['ip']})...")
-
+    client = None
     try:
+        if defaults.get("scan_before_patch") == "1":
+            yield emit("Pre-scan: refreshing package list...")
+            try:
+                await scan_host_async(host_id)
+                yield emit("Pre-scan complete", "ok")
+            except Exception as e:
+                yield emit(f"Pre-scan failed (continuing): {e}", "warn")
+
+        yield emit(f"Connecting to {host_name} ({row['ip']})...")
         client = await ssh_connect_async(row)
         yield emit("Connected", "ok")
 
@@ -1988,22 +2072,20 @@ async def patch_host_stream(host_id: int, security_only: bool = False, notify: b
         if reboot:
             yield emit("Reboot required (kernel or libc updated)", "warn")
 
-        client.close()
-
+    except (asyncio.CancelledError, GeneratorExit):
+        emit("Interrupted: PatchKit stopped mid-run, check the host's package manager log", "error")
+        run_result = "error"
+        finalize()
+        raise
     except Exception as e:
         yield emit(f"SSH error: {e}", "error")
         run_result = "error"
     finally:
+        if client is not None:
+            client.close()
         _release_lock(host_id)
 
-    duration = round(time.time() - t0, 1)
-    db.execute(
-        """UPDATE patch_runs SET finished_at=datetime('now'), pkg_count=?, result=?, duration_s=?, log=?
-           WHERE id=?""",
-        (pkg_count, run_result, duration, "\n".join(log_lines), run_id),
-    )
-    db.commit()
-    db.close()
+    duration = finalize()
     yield emit(f"Done in {duration}s", "done")
 
     if results is not None:
@@ -2810,9 +2892,25 @@ async def scan_all():
 
 
 @app.get("/api/hosts/{host_id}/patch")
-async def patch_host(host_id: int, security_only: bool = False, batch: str | None = None, batch_size: int = 0):
+async def patch_host(request: Request, host_id: int, security_only: bool = False, batch: str | None = None,
+                     batch_size: int = 0, job: str | None = None, from_: int = Query(0, alias="from")):
+    if job is not None and not _JOB_KEY_RE.match(job):
+        raise HTTPException(400, "Invalid job key")
+    last_id = request.headers.get("last-event-id", "")
+    start = int(last_id) + 1 if last_id.isdigit() else from_
+    pj = _patch_jobs.get(job) if job else None
+    if pj is None and start > 0:
+        async def lost():
+            yield "data: error|Lost track of this patch run (PatchKit restarted?) - check History for its result\n\n"
+            yield "data: DONE\n\n"
+        return StreamingResponse(lost(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if pj is None:
+        job = job or secrets.token_urlsafe(12)
+        pj = _patch_jobs[job] = _PatchJob(
+            job, patch_host_stream(host_id, security_only=security_only, batch_id=batch, batch_size=batch_size))
     return StreamingResponse(
-        patch_host_stream(host_id, security_only=security_only, batch_id=batch, batch_size=batch_size),
+        pj.follow(start),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

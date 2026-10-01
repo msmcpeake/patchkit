@@ -1633,29 +1633,55 @@ function streamPatch(hostId, opts = {}) {
   const params = new URLSearchParams();
   if (securityOnly) params.set('security_only', '1');
   if (batch) { params.set('batch', batch); params.set('batch_size', batchSize); }
-  const qs = params.toString();
-  const es = new EventSource(`/api/hosts/${hostId}/patch${qs ? '?' + qs : ''}`);
+  // The patch runs server-side regardless of this connection; the job key lets
+  // a dropped stream (e.g. the reverse proxy restarting mid-run) reattach and
+  // resume from the last event it saw instead of giving up on the host.
+  params.set('job', 'j' + hostId + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
   const advance = () => {
     if (remaining.length > 0) {
       const next = remaining[0];
       streamPatch(next, { batch, batchSize, securityOnly, remaining: remaining.slice(1) });
     }
   };
-  es.onmessage = e => {
-    if (e.data === 'DONE') {
+  const RECONNECT_GIVE_UP_MS = 15 * 60 * 1000;
+  let nextId = 0, failedSince = null, attempt = 0;
+  const connect = () => {
+    params.set('from', nextId);
+    const es = new EventSource(`/api/hosts/${hostId}/patch?${params}`);
+    es.onopen = () => {
+      if (failedSince !== null) _opLine(key, 'ok', 'Reconnected, resuming log');
+      failedSince = null; attempt = 0;
+    };
+    es.onmessage = e => {
+      if (e.lastEventId !== '') nextId = parseInt(e.lastEventId) + 1;
+      if (e.data === 'DONE') {
+        es.close();
+        S.patching.delete(hostId);
+        _opDone(key, 'ok');
+        loadHosts().then(() => {
+          if (remaining.length > 0) advance();
+          else render();
+        });
+        return;
+      }
+      const [level, ...rest] = e.data.split('|');
+      _opLine(key, level || 'info', rest.join('|'));
+    };
+    es.onerror = () => {
       es.close();
-      S.patching.delete(hostId);
-      _opDone(key, 'ok');
-      loadHosts().then(() => {
-        if (remaining.length > 0) advance();
-        else render();
-      });
-      return;
-    }
-    const [level, ...rest] = e.data.split('|');
-    _opLine(key, level || 'info', rest.join('|'));
+      if (failedSince === null) {
+        failedSince = Date.now();
+        _opLine(key, 'warn', 'Connection lost, patch keeps running on the server; reconnecting...');
+      }
+      if (Date.now() - failedSince > RECONNECT_GIVE_UP_MS) {
+        _opLine(key, 'error', 'Could not reconnect, check History for this host\'s result');
+        S.patching.delete(hostId); _opDone(key, 'error'); advance();
+        return;
+      }
+      setTimeout(connect, Math.min(1000 * 2 ** attempt++, 15000));
+    };
   };
-  es.onerror = () => { es.close(); S.patching.delete(hostId); _opDone(key, 'error'); advance(); };
+  connect();
 }
 
 // Patches many hosts with a bounded number of concurrent EventSource
