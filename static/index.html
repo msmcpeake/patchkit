@@ -1243,12 +1243,16 @@ function _opDone(key, status) {
 // ---- End unified panel ----
 
 const K8S_TAG = 'k8s';
+// "k8s" or "k8s:<cluster>" when one PatchKit manages several clusters.
+function k8sClusterTag(h) {
+  return hostTagList(h).find(t => t === K8S_TAG || t.startsWith(K8S_TAG + ':')) || null;
+}
 
 function rollingReboot(tag, onlyIds) {
   const inGroup = S.hosts.filter(h => h.enabled && hostTagList(h).includes(tag));
   const ids = (onlyIds ? inGroup.filter(h => onlyIds.includes(h.id)) : inGroup).map(h => h.id);
   if (!onlyIds) {
-    const k8s = inGroup.some(h => hostTagList(h).includes(K8S_TAG));
+    const k8s = inGroup.some(h => k8sClusterTag(h));
     const how = k8s
       ? 'Kubernetes nodes are checked for cluster health, drained, rebooted one at a time (workers first, then control-plane) and must rejoin the cluster before the next one starts. Expect several minutes per node.'
       : 'Each host will be rebooted one at a time and must recover before the next is rebooted.';
@@ -1378,6 +1382,19 @@ async function settings() {
       </div>
     </div>
     <div class="settings-section">
+      <h4>Kubernetes</h4>
+      <div class="form-hint" style="margin-bottom:8px">Hosts tagged <code>k8s</code> (or <code>k8s:&lt;cluster&gt;</code> for several clusters) are drained before reboot and must rejoin the cluster before the next one starts.</div>
+      <div class="form-row"><label>kubectl command</label><input id="s-k8s-kubectl" placeholder="auto (RKE2, k3s, kubeadm, or kubectl on PATH)" value="${esc(cfg.k8s_kubectl||'')}">
+        <div class="form-hint">Leave empty to auto-detect. Otherwise the command run over SSH on the cluster's hosts, e.g. <code>kubectl --kubeconfig /root/.kube/config</code>.</div>
+      </div>
+      <div class="form-row"><label>Drain flags</label><input id="s-k8s-drain-flags" placeholder="--ignore-daemonsets --delete-emptydir-data --force --timeout=300s" value="${esc(cfg.k8s_drain_flags||'')}">
+        <div class="form-hint">Passed to <code>kubectl drain</code>. A --timeout is added if missing.</div>
+      </div>
+      <div class="form-row"><label>Node rejoin timeout (s)</label><input id="s-k8s-ready-timeout" value="${cfg.k8s_ready_timeout||'900'}" type="number">
+        <div class="form-hint">How long a rebooted node gets to report Ready with its pods running before the run stops.</div>
+      </div>
+    </div>
+    <div class="settings-section">
       <h4>Notifications</h4>
       <div class="form-row"><label>SMTP relay</label><input id="s-smtp" placeholder="smtp.example.com:587" value="${cfg.smtp_relay||''}"></div>
       <div class="form-row"><label>Notify email</label><input id="s-email" placeholder="you@example.com" value="${cfg.notify_email||''}"></div>
@@ -1472,7 +1489,7 @@ function streamReboot(hostId, hostName) {
 
 async function rebootHost(id, name) {
   const h = S.hosts.find(x => x.id === id);
-  const k8s = h && hostTagList(h).includes(K8S_TAG);
+  const k8s = h && k8sClusterTag(h);
   if (!confirm(k8s
     ? `Reboot Kubernetes node ${name}? It will be drained first, and PatchKit waits for it to rejoin the cluster before uncordoning it.`
     : `Reboot ${name} now? The host will be temporarily unreachable.`)) return;
@@ -1483,11 +1500,13 @@ async function rebootAll() {
   const need = S.hosts.filter(h => h.scan && h.scan.reboot_req);
   if (!need.length) return;
   const names = need.map(h => h.name).join(', ');
-  const k8s = need.filter(h => hostTagList(h).includes(K8S_TAG));
+  const k8s = need.filter(h => k8sClusterTag(h));
   const note = k8s.length ? `\n\nKubernetes nodes (${k8s.map(h => h.name).join(', ')}) are drained and rebooted one at a time, not in parallel.` : '';
   if (!confirm(`Reboot ${need.length} host${need.length>1?'s':''} pending a kernel update?\n\n${names}${note}`)) return;
   need.filter(h => !k8s.includes(h)).forEach(h => streamReboot(h.id, h.name));
-  if (k8s.length) rollingReboot(K8S_TAG, k8s.map(h => h.id));
+  const byCluster = {};
+  k8s.forEach(h => (byCluster[k8sClusterTag(h)] ||= []).push(h.id));
+  Object.entries(byCluster).forEach(([tag, ids]) => rollingReboot(tag, ids));
 }
 
 function filterUpdatePkgs(q) {
@@ -1999,6 +2018,9 @@ async function saveSettings() {
     auto_security: document.getElementById('s-auto-sec').checked ? '1' : '0',
     scan_before_patch: document.getElementById('s-scan-before-patch').checked ? '1' : '0',
     reboot_timeout: document.getElementById('s-reboot-timeout').value,
+    k8s_kubectl: document.getElementById('s-k8s-kubectl').value.trim(),
+    k8s_drain_flags: document.getElementById('s-k8s-drain-flags').value.trim(),
+    k8s_ready_timeout: document.getElementById('s-k8s-ready-timeout').value,
     sudo_pass: document.getElementById('s-sudo-pass').value,
     smtp_relay: document.getElementById('s-smtp').value,
     notify_email: document.getElementById('s-email').value,
