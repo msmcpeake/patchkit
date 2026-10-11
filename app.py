@@ -42,9 +42,17 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.13.1"
+APP_VERSION = "1.13.2"
 
 CHANGELOG = [
+    {
+        "version": "1.13.2",
+        "date": "2026-10-11",
+        "changes": [
+            "The patch-all and patch-group API endpoints now run as detached server jobs like single-host patching: a dropped stream (e.g. the reverse proxy restarting mid-run) no longer cancels the remaining hosts, and clients can reconnect with job/from or Last-Event-ID to resume the output",
+            "patch-all and patch-group streams now send a single DONE at the end of the batch instead of one per host, so SSE clients no longer stop after the first host",
+        ],
+    },
     {
         "version": "1.13.1",
         "date": "2026-10-11",
@@ -2838,22 +2846,9 @@ async def rolling_reboot_stream(tag: str, grace: int = 30, ids: str = ""):
 
 
 @app.get("/api/patch-group/{tag}")
-async def patch_group_stream(tag: str):
-    ids = _hosts_for_tag(tag)
-
-    async def combined():
-        results: list[dict] = []
-        for hid in ids:
-            async for chunk in patch_host_stream(hid, notify=False, results=results):
-                yield chunk
-        await _send_batch_notification(results)
-        await _send_batch_webhook(results)
-
-    return StreamingResponse(
-        combined(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+async def patch_group_stream(request: Request, tag: str, job: str | None = None,
+                             from_: int = Query(0, alias="from")):
+    return _patch_job_response(request, job, from_, lambda: _patch_sequence_gen(_hosts_for_tag(tag)))
 
 
 @app.post("/api/hosts", status_code=201)
@@ -3356,9 +3351,8 @@ async def scan_all():
     return [r if isinstance(r, dict) else {"error": str(r)} for r in results]
 
 
-@app.get("/api/hosts/{host_id}/patch")
-async def patch_host(request: Request, host_id: int, security_only: bool = False, batch: str | None = None,
-                     batch_size: int = 0, job: str | None = None, from_: int = Query(0, alias="from")):
+def _patch_job_response(request: Request, job: str | None, from_: int, make_gen) -> StreamingResponse:
+    """Follow an existing patch job, or start make_gen() as a new detached one."""
     if job is not None and not _JOB_KEY_RE.match(job):
         raise HTTPException(400, "Invalid job key")
     last_id = request.headers.get("last-event-id", "")
@@ -3372,8 +3366,7 @@ async def patch_host(request: Request, host_id: int, security_only: bool = False
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     if pj is None:
         job = job or secrets.token_urlsafe(12)
-        pj = _patch_jobs[job] = _PatchJob(
-            job, patch_host_stream(host_id, security_only=security_only, batch_id=batch, batch_size=batch_size))
+        pj = _patch_jobs[job] = _PatchJob(job, make_gen())
     return StreamingResponse(
         pj.follow(start),
         media_type="text/event-stream",
@@ -3381,25 +3374,32 @@ async def patch_host(request: Request, host_id: int, security_only: bool = False
     )
 
 
-@app.get("/api/patch-all")
-async def patch_all():
-    db = get_db()
-    ids = [r["id"] for r in db.execute("SELECT id FROM hosts WHERE enabled=1")]
-    db.close()
-
-    async def combined():
-        results: list[dict] = []
-        for hid in ids:
-            async for chunk in patch_host_stream(hid, notify=False, results=results):
+async def _patch_sequence_gen(ids: list[int]):
+    results: list[dict] = []
+    for hid in ids:
+        async for chunk in patch_host_stream(hid, notify=False, results=results):
+            if chunk != "data: DONE\n\n":
                 yield chunk
-        await _send_batch_notification(results)
-        await _send_batch_webhook(results)
+    await _send_batch_notification(results)
+    await _send_batch_webhook(results)
+    yield "data: DONE\n\n"
 
-    return StreamingResponse(
-        combined(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+
+@app.get("/api/hosts/{host_id}/patch")
+async def patch_host(request: Request, host_id: int, security_only: bool = False, batch: str | None = None,
+                     batch_size: int = 0, job: str | None = None, from_: int = Query(0, alias="from")):
+    return _patch_job_response(request, job, from_, lambda: patch_host_stream(
+        host_id, security_only=security_only, batch_id=batch, batch_size=batch_size))
+
+
+@app.get("/api/patch-all")
+async def patch_all(request: Request, job: str | None = None, from_: int = Query(0, alias="from")):
+    def make_gen():
+        db = get_db()
+        ids = [r["id"] for r in db.execute("SELECT id FROM hosts WHERE enabled=1")]
+        db.close()
+        return _patch_sequence_gen(ids)
+    return _patch_job_response(request, job, from_, make_gen)
 
 
 @app.get("/api/history")
