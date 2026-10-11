@@ -42,9 +42,18 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.13.2"
+APP_VERSION = "1.13.3"
 
 CHANGELOG = [
+    {
+        "version": "1.13.3",
+        "date": "2026-10-11",
+        "changes": [
+            "Reboots are now confirmed by the host's boot ID: PatchKit reads it before sending reboot and only reports the host as back once it answers SSH with a new one. Previously a host that ignored the reboot command was waited on for 120s, then reported as rebooted and ready because SSH still answered",
+            "A host that is still up on the same boot 120s after the reboot command is reported as not rebooted and a rolling reboot stops there; a non-zero exit from the reboot command is reported too",
+            "Single-host reboot, rolling reboot, the fire-and-forget POST reboot endpoint and the Kubernetes reboot path all share this one check",
+        ],
+    },
     {
         "version": "1.13.2",
         "date": "2026-10-11",
@@ -2574,45 +2583,73 @@ def _emit(msg: str, level: str = "info") -> str:
     return f"data: {level}|[{ts}] {msg}\n\n"
 
 
-async def _reboot_and_wait(host: dict, defaults: dict, label: str):
-    """Send reboot, wait for SSH down then up. Yields SSE lines; last item is a bool."""
-    name, ip, port = host["name"], host["ip"], int(host.get("port") or 22)
+_REBOOT_DOWN_S = 120
+
+
+async def _read_boot_id(host) -> str:
+    client = await ssh_connect_async(host, max_attempts=1)
+    try:
+        rc, out, _ = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: ssh_run(client, "cat /proc/sys/kernel/random/boot_id", timeout=10)
+        )
+    finally:
+        client.close()
+    return out.strip() if rc == 0 else ""
+
+
+async def _reboot_and_wait(host, defaults: dict, label: str):
+    """Send reboot, then wait until the host answers SSH with a new boot ID (or, if
+    the boot ID can't be read, until it has been unreachable and is back).
+    Yields SSE lines; last item is a bool."""
+    name, ip = host["name"], host["ip"]
     reboot_timeout = int(defaults.get("reboot_timeout", 300))
+    loop = asyncio.get_event_loop()
     yield _emit(f"{label}Rebooting {name} ({ip})...", "info")
+    try:
+        old_boot = await asyncio.wait_for(_read_boot_id(host), 30)
+    except Exception as e:
+        yield _emit(f"  Could not connect to {name} ({e}), not rebooting", "error")
+        yield False
+        return
     try:
         client = await ssh_connect_async(host, max_attempts=1)
         sudo_pass = _resolve_sudo_pass(host, defaults)
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
-        )
-        client.close()
+        try:
+            rc, out, err = await loop.run_in_executor(
+                None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
+            )
+        finally:
+            client.close()
+        if rc not in (0, -1):
+            yield _emit(f"  reboot command failed on {name} (exit {rc}): {(err or out).strip()[:200]}", "error")
+            yield False
+            return
     except Exception:
         pass  # connection drop on reboot is expected
 
     yield _emit(f"  Waiting for {name} to go offline...", "info")
-    deadline = asyncio.get_event_loop().time() + 120
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(5)
-        try:
-            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=3)
-            w.close()
-            await w.wait_closed()
-        except Exception:
-            break  # connection refused/timeout = node is down
-
-    yield _emit(f"  {name} is offline, waiting for recovery...", "warn")
-    deadline = asyncio.get_event_loop().time() + reboot_timeout
-    while asyncio.get_event_loop().time() < deadline:
+    sent = loop.time()
+    deadline = sent + _REBOOT_DOWN_S + reboot_timeout
+    went_down = False
+    while loop.time() < deadline:
         await asyncio.sleep(10)
         try:
-            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=5)
-            w.close()
-            await w.wait_closed()
+            boot = await asyncio.wait_for(_read_boot_id(host), 30)
+        except Exception:
+            if not went_down:
+                went_down = True
+                yield _emit(f"  {name} is offline, waiting for recovery...", "warn")
+            continue
+        if (old_boot and boot and boot != old_boot) or (not old_boot and went_down):
             yield True
             return
-        except Exception:
-            continue
-    yield _emit(f"  {name} did not recover within {reboot_timeout}s, stopping", "error")
+        if not went_down and loop.time() - sent > _REBOOT_DOWN_S:
+            yield _emit(f"  {name} did not reboot: still up on the same boot {_REBOOT_DOWN_S}s after "
+                        f"the reboot command. Stopping", "error")
+            yield False
+            return
+    yield _emit(f"  {name} did not come back with a new boot within "
+                f"{_REBOOT_DOWN_S + reboot_timeout}s, stopping", "error")
     yield False
 
 
@@ -3197,62 +3234,23 @@ async def reboot_host_stream(host_id: int):
                 yield chunk
             return
 
-        ip   = row["ip"]
-        port = int(row["port"] or 22)
-        sudo_pass = _resolve_sudo_pass(row, defaults)
-        reboot_timeout = int(defaults.get("reboot_timeout", 300))
-
-        def emit(msg: str, level: str = "info") -> str:
-            ts = datetime.now().strftime("%H:%M:%S")
-            return f"data: {level}|[{ts}] {msg}\n\n"
-
-        yield emit(f"Sending reboot command to {row['name']} ({ip})...")
-        try:
-            client = await ssh_connect_async(row, max_attempts=1)
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
-            )
-            client.close()
-        except Exception:
-            pass  # connection drop on reboot is expected
-
-        yield emit("Waiting for host to go offline...")
-        deadline = asyncio.get_event_loop().time() + 120
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(5)
-            try:
-                r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=3)
-                w.close()
-                await w.wait_closed()
-            except Exception:
-                break
-
-        yield emit(f"Host is offline, waiting for recovery (timeout: {reboot_timeout}s)...", "warn")
-        deadline = asyncio.get_event_loop().time() + reboot_timeout
         recovered = False
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(10)
-            try:
-                r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=5)
-                w.close()
-                await w.wait_closed()
-                recovered = True
-                break
-            except Exception:
-                continue
-
+        async for item in _reboot_and_wait(row, defaults, ""):
+            if isinstance(item, bool):
+                recovered = item
+            else:
+                yield item
         if not recovered:
-            yield emit("Host did not come back within 5 minutes", "error")
             yield "data: DONE\n\n"
             return
 
-        yield emit("Host is back online, rescanning...", "ok")
+        yield _emit("Host is back online, rescanning...", "ok")
         await asyncio.sleep(10)
         try:
             await scan_host_async(host_id)
-            yield emit("Rescan complete, reboot flag cleared", "ok")
+            yield _emit("Rescan complete, reboot flag cleared", "ok")
         except Exception as e:
-            yield emit(f"Rescan failed: {e}", "warn")
+            yield _emit(f"Rescan failed: {e}", "warn")
 
         yield "data: DONE\n\n"
 
@@ -3270,40 +3268,23 @@ async def reboot_host(host_id: int):
         raise HTTPException(404, "Host not found")
     if _is_k8s_host(row):
         raise HTTPException(409, "Kubernetes node: use GET /api/hosts/{id}/reboot or a rolling reboot so it is drained first")
-    sudo_pass = _resolve_sudo_pass(row, defaults)
-    try:
-        client = await ssh_connect_async(row, max_attempts=1)
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
-        )
-        client.close()
-    except Exception:
-        pass  # connection drop on reboot is expected
-
-    reboot_timeout = int(defaults.get("reboot_timeout", 300))
-    asyncio.create_task(_rescan_after_reboot(host_id, row["ip"], int(row["port"] or 22), reboot_timeout))
+    asyncio.create_task(_reboot_then_rescan(row, defaults))
     return {"ok": True}
 
 
-async def _rescan_after_reboot(host_id: int, ip: str, port: int, timeout: int = 300):
-    """Wait for SSH to come back after reboot, then trigger a rescan."""
-    await asyncio.sleep(15)  # give the system time to start shutting down
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(10)
-        try:
-            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=5)
-            w.close()
-            await w.wait_closed()
-            break  # SSH port is back up
-        except Exception:
-            continue
-    else:
-        return  # timed out, skip rescan
-
+async def _reboot_then_rescan(row, defaults: dict):
+    """Fire-and-forget reboot: rescan once the host is back on a new boot."""
+    recovered = False
+    async for item in _reboot_and_wait(row, defaults, ""):
+        if isinstance(item, bool):
+            recovered = item
+        elif item.startswith("data: error|"):
+            print(f"PatchKit reboot {row['name']}: {item[12:].strip()}", flush=True)
+    if not recovered:
+        return
     await asyncio.sleep(10)  # brief settle time before scanning
     try:
-        await scan_host_async(host_id)
+        await scan_host_async(row["id"])
     except Exception:
         pass
 
