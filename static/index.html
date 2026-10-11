@@ -1242,13 +1242,23 @@ function _opDone(key, status) {
 }
 // ---- End unified panel ----
 
-function rollingReboot(tag) {
-  if (!confirm(`Rolling reboot all hosts in group "${tag}"?\n\nEach host will be rebooted one at a time and must recover before the next is rebooted.`)) return;
-  const ids = S.hosts.filter(h => hostTagList(h).includes(tag)).map(h => h.id);
+const K8S_TAG = 'k8s';
+
+function rollingReboot(tag, onlyIds) {
+  const inGroup = S.hosts.filter(h => h.enabled && hostTagList(h).includes(tag));
+  const ids = (onlyIds ? inGroup.filter(h => onlyIds.includes(h.id)) : inGroup).map(h => h.id);
+  if (!onlyIds) {
+    const k8s = inGroup.some(h => hostTagList(h).includes(K8S_TAG));
+    const how = k8s
+      ? 'Kubernetes nodes are checked for cluster health, drained, rebooted one at a time (workers first, then control-plane) and must rejoin the cluster before the next one starts. Expect several minutes per node.'
+      : 'Each host will be rebooted one at a time and must recover before the next is rebooted.';
+    if (!confirm(`Rolling reboot all hosts in group "${tag}"?\n\n${how}`)) return;
+  }
   ids.forEach(id => S.patching.add(id));
   const key = 'rolling-' + tag;
   _opStart(key, 'Rolling reboot: ' + tag);
-  const es = new EventSource(`/api/rolling-reboot/${encodeURIComponent(tag)}`);
+  const qs = onlyIds ? `?ids=${ids.join(',')}` : '';
+  const es = new EventSource(`/api/rolling-reboot/${encodeURIComponent(tag)}${qs}`);
   es.onmessage = e => {
     if (e.data === 'DONE') {
       es.close();
@@ -1461,7 +1471,11 @@ function streamReboot(hostId, hostName) {
 }
 
 async function rebootHost(id, name) {
-  if (!confirm(`Reboot ${name} now? The host will be temporarily unreachable.`)) return;
+  const h = S.hosts.find(x => x.id === id);
+  const k8s = h && hostTagList(h).includes(K8S_TAG);
+  if (!confirm(k8s
+    ? `Reboot Kubernetes node ${name}? It will be drained first, and PatchKit waits for it to rejoin the cluster before uncordoning it.`
+    : `Reboot ${name} now? The host will be temporarily unreachable.`)) return;
   streamReboot(id, name);
 }
 
@@ -1469,8 +1483,11 @@ async function rebootAll() {
   const need = S.hosts.filter(h => h.scan && h.scan.reboot_req);
   if (!need.length) return;
   const names = need.map(h => h.name).join(', ');
-  if (!confirm(`Reboot ${need.length} host${need.length>1?'s':''} pending a kernel update?\n\n${names}`)) return;
-  need.forEach(h => streamReboot(h.id, h.name));
+  const k8s = need.filter(h => hostTagList(h).includes(K8S_TAG));
+  const note = k8s.length ? `\n\nKubernetes nodes (${k8s.map(h => h.name).join(', ')}) are drained and rebooted one at a time, not in parallel.` : '';
+  if (!confirm(`Reboot ${need.length} host${need.length>1?'s':''} pending a kernel update?\n\n${names}${note}`)) return;
+  need.filter(h => !k8s.includes(h)).forEach(h => streamReboot(h.id, h.name));
+  if (k8s.length) rollingReboot(K8S_TAG, k8s.map(h => h.id));
 }
 
 function filterUpdatePkgs(q) {

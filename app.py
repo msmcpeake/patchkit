@@ -42,9 +42,20 @@ LOCK_DIR = Path("/tmp")
 KNOWN_HOSTS = DATA_DIR / "patchkit_known_hosts"
 _KNOWN_HOSTS_LOCK = threading.Lock()
 
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 
 CHANGELOG = [
+    {
+        "version": "1.13.0",
+        "date": "2026-10-11",
+        "changes": [
+            "Kubernetes-aware reboots for hosts tagged \"k8s\" (RKE2). Before each node PatchKit checks the cluster is healthy (all nodes Ready, every etcd member Ready, every DaemonSet/static pod Ready, apiserver /readyz ok; it waits up to 5 minutes for that) and refuses to reboot an etcd member when that would lose quorum",
+            "Each k8s node is cordoned and drained before reboot, then PatchKit waits for the kubelet to report a new boot ID, for every DaemonSet and static pod on that node (CNI, kube-proxy, ingress, control-plane components) to be Ready, and for the whole cluster to be healthy again before uncordoning it and moving on. Rolling reboots do workers first, then control-plane nodes. kubectl runs over SSH on a control-plane host other than the one rebooting",
+            "If a step fails the run stops and says which node is left cordoned. If the browser stream is dropped mid-node, PatchKit still uncordons it once it is back and Ready",
+            "Single-host reboot of a k8s node uses the same drain/rejoin flow, and \"Reboot all\" now reboots pending k8s nodes one at a time instead of all at once. The fire-and-forget POST reboot endpoint refuses k8s nodes",
+            "New optional setting k8s_ready_timeout (seconds a node gets to rejoin, default 900)",
+        ],
+    },
     {
         "version": "1.12.0",
         "date": "2026-10-01",
@@ -2283,93 +2294,423 @@ async def scan_group(tag: str):
     return [r if isinstance(r, dict) else {"error": str(r)} for r in results]
 
 
+# ---- Kubernetes-aware reboots ----
+# Hosts tagged K8S_TAG are RKE2 nodes. Rebooting one is only safe if the cluster
+# is healthy first, the node is drained, and the next node waits until this one
+# has really rejoined (new kubelet boot, etcd member back). SSH reachability alone
+# says nothing about any of that.
+
+K8S_TAG = "k8s"
+_KUBECTL = ('K=$(ls -td /var/lib/rancher/rke2/data/*/bin/kubectl 2>/dev/null | head -1); '
+            '[ -x "$K" ] || { echo "kubectl not found" >&2; exit 127; }; '
+            'KUBECONFIG=/etc/rancher/rke2/rke2.yaml "$K" ')
+_ETCD_ROLE = "node-role.kubernetes.io/etcd"
+_CP_ROLE = "node-role.kubernetes.io/control-plane"
+
+
+def _host_tags(host) -> list[str]:
+    return [t.strip() for t in (host["tags"] or "").split(",") if t.strip()]
+
+
+def _is_k8s_host(host) -> bool:
+    return K8S_TAG in _host_tags(host)
+
+
+async def _ssh_exec(host, defaults: dict, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
+    client = await ssh_connect_async(host, max_attempts=2)
+    try:
+        sudo_pass = _resolve_sudo_pass(host, defaults)
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: ssh_run(client, cmd, timeout=timeout, sudo_pass=sudo_pass)
+        )
+    finally:
+        client.close()
+
+
+def _cond_true(obj: dict, cond: str) -> bool:
+    return any(c.get("type") == cond and c.get("status") == "True"
+               for c in obj.get("status", {}).get("conditions", []))
+
+
+class _K8sCluster:
+    """kubectl access to the cluster via SSH to its control-plane hosts in PatchKit."""
+
+    def __init__(self, hosts: list[dict], defaults: dict):
+        self.hosts = hosts          # every enabled k8s-tagged host
+        self.defaults = defaults
+        self.cp_ids: set[int] = set()
+        self.node_of: dict[int, str] = {}
+
+    async def kubectl(self, args: str, exclude_id: Optional[int] = None,
+                      timeout: int = 60) -> str:
+        """Run kubectl on a control-plane host (never exclude_id). Falls through to
+        the next host only when this one can't reach the API at all."""
+        last = "no control-plane host reachable"
+        candidates = [h for h in self.hosts if h["id"] != exclude_id
+                      and (not self.cp_ids or h["id"] in self.cp_ids)]
+        for h in candidates:
+            try:
+                rc, out, err = await _ssh_exec(h, self.defaults, _KUBECTL + args, timeout)
+            except Exception as e:
+                last = f"{h['name']}: {e}"
+                continue
+            if rc == 0:
+                return out
+            msg = (err or out).strip()
+            last = f"{h['name']}: {msg[-400:]}"
+            unreachable = rc == 127 or any(s in msg for s in (
+                "Unable to connect", "connection refused", "no such file", "i/o timeout",
+                "ServiceUnavailable", "TLS handshake timeout"))
+            if not unreachable:
+                break
+        raise RuntimeError(last)
+
+    async def nodes(self, exclude_id: Optional[int] = None) -> dict[str, dict]:
+        data = json.loads(await self.kubectl("get nodes -o json", exclude_id))
+        res = {}
+        for n in data.get("items", []):
+            labels = n["metadata"].get("labels", {})
+            res[n["metadata"]["name"]] = {
+                "ip": next((a["address"] for a in n["status"].get("addresses", [])
+                            if a.get("type") == "InternalIP"), None),
+                "ready": _cond_true(n, "Ready"),
+                "cordoned": bool(n["spec"].get("unschedulable")),
+                "cp": _CP_ROLE in labels,
+                "etcd": _ETCD_ROLE in labels,
+                "boot_id": n["status"].get("nodeInfo", {}).get("bootID", ""),
+            }
+        return res
+
+    async def discover(self) -> dict[str, dict]:
+        nodes = await self.nodes()
+        by_ip = {v["ip"]: name for name, v in nodes.items()}
+        for h in self.hosts:
+            name = by_ip.get(h["ip"])
+            if name:
+                self.node_of[h["id"]] = name
+                if nodes[name]["cp"]:
+                    self.cp_ids.add(h["id"])
+        return nodes
+
+    async def etcd_pods(self, exclude_id: Optional[int] = None) -> dict[str, dict]:
+        data = json.loads(await self.kubectl(
+            "get pods -n kube-system -l component=etcd -o json", exclude_id))
+        res = {}
+        for p in data.get("items", []):
+            started = [cs.get("state", {}).get("running", {}).get("startedAt", "")
+                       for cs in p.get("status", {}).get("containerStatuses", [])]
+            res[p["spec"].get("nodeName", "")] = {
+                "ready": _cond_true(p, "Ready"),
+                "started": min(started) if started and all(started) else "",
+            }
+        return res
+
+    async def node_pods_ready(self, node: Optional[str] = None,
+                              exclude_id: Optional[int] = None) -> tuple[bool, str]:
+        """Node Ready flips before its CNI/kube-proxy/ingress (DaemonSet) and static
+        control-plane pods are back, so require those to be Ready too. node=None
+        checks every node."""
+        sel = f"--field-selector spec.nodeName={shlex.quote(node)} " if node else ""
+        data = json.loads(await self.kubectl(f"get pods -A {sel}-o json", exclude_id))
+        bad = []
+        for p in data.get("items", []):
+            owners = {o.get("kind") for o in p["metadata"].get("ownerReferences", [])}
+            if not owners & {"DaemonSet", "Node"}:
+                continue
+            if p.get("metadata", {}).get("deletionTimestamp"):
+                continue
+            if p.get("status", {}).get("phase") == "Succeeded":
+                continue
+            if not _cond_true(p, "Ready"):
+                bad.append(p["metadata"]["name"])
+        if bad:
+            return False, "node pods not Ready: " + ", ".join(sorted(bad))
+        return True, ""
+
+    async def health(self, exclude_id: Optional[int] = None) -> tuple[bool, str]:
+        """All nodes Ready, every etcd member's pod Ready, apiserver /readyz ok."""
+        try:
+            nodes = await self.nodes(exclude_id)
+            bad = [n for n, v in nodes.items() if not v["ready"]]
+            if bad:
+                return False, "node(s) not Ready: " + ", ".join(bad)
+            etcd_nodes = [n for n, v in nodes.items() if v["etcd"]]
+            if etcd_nodes:
+                pods = await self.etcd_pods(exclude_id)
+                bad = [n for n in etcd_nodes if not pods.get(n, {}).get("ready")]
+                if bad:
+                    return False, "etcd member(s) not Ready: " + ", ".join(bad)
+            ok, msg = await self.node_pods_ready(None, exclude_id)
+            if not ok:
+                return False, msg
+            ready = (await self.kubectl("get --raw=/readyz", exclude_id)).strip()
+            if ready != "ok":
+                return False, f"apiserver /readyz: {ready[-200:]}"
+            return True, f"{len(nodes)} node(s) Ready, {len(etcd_nodes)} etcd member(s) healthy"
+        except Exception as e:
+            return False, str(e)
+
+
+def _k8s_cluster_hosts() -> list[dict]:
+    db = get_db()
+    rows = [dict(r) for r in db.execute("SELECT * FROM hosts WHERE enabled=1 ORDER BY id")]
+    db.close()
+    return [h for h in rows if _is_k8s_host(h)]
+
+
+def _emit(msg: str, level: str = "info") -> str:
+    ts = datetime.now().strftime("%H:%M:%S")
+    return f"data: {level}|[{ts}] {msg}\n\n"
+
+
+async def _reboot_and_wait(host: dict, defaults: dict, label: str):
+    """Send reboot, wait for SSH down then up. Yields SSE lines; last item is a bool."""
+    name, ip, port = host["name"], host["ip"], int(host.get("port") or 22)
+    reboot_timeout = int(defaults.get("reboot_timeout", 300))
+    yield _emit(f"{label}Rebooting {name} ({ip})...", "info")
+    try:
+        client = await ssh_connect_async(host, max_attempts=1)
+        sudo_pass = _resolve_sudo_pass(host, defaults)
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=sudo_pass)
+        )
+        client.close()
+    except Exception:
+        pass  # connection drop on reboot is expected
+
+    yield _emit(f"  Waiting for {name} to go offline...", "info")
+    deadline = asyncio.get_event_loop().time() + 120
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(5)
+        try:
+            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=3)
+            w.close()
+            await w.wait_closed()
+        except Exception:
+            break  # connection refused/timeout = node is down
+
+    yield _emit(f"  {name} is offline, waiting for recovery...", "warn")
+    deadline = asyncio.get_event_loop().time() + reboot_timeout
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(10)
+        try:
+            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=5)
+            w.close()
+            await w.wait_closed()
+            yield True
+            return
+        except Exception:
+            continue
+    yield _emit(f"  {name} did not recover within {reboot_timeout}s, stopping", "error")
+    yield False
+
+
+async def _uncordon_when_ready(cluster: _K8sCluster, host_id: int, node: str, boot_id: str):
+    """Safety net when a k8s reboot stream is abandoned mid-node (browser closed,
+    PatchKit restart): uncordon once the node has rebooted and is Ready again."""
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline:
+        await asyncio.sleep(30)
+        try:
+            n = (await cluster.nodes(host_id)).get(node, {})
+            if n.get("ready") and n.get("boot_id") != boot_id:
+                await cluster.kubectl(f"uncordon {shlex.quote(node)}", host_id)
+                return
+        except Exception:
+            continue
+
+
+async def _k8s_reboot_one(cluster: _K8sCluster, host: dict, defaults: dict,
+                          grace: int, label: str):
+    """Drain -> reboot -> wait for new boot + Ready (+ etcd) -> uncordon.
+    Yields SSE lines; last item is a bool (True = safe to continue)."""
+    name, hid = host["name"], host["id"]
+    node = cluster.node_of.get(hid)
+    if not node:
+        yield _emit(f"{label}{name} ({host['ip']}) is not a node in the cluster, stopping", "error")
+        yield False
+        return
+    ready_timeout = int(defaults.get("k8s_ready_timeout", 900))
+
+    ok, msg = await cluster.health(hid)
+    if not ok:
+        # Give a node that just rejoined a few minutes for its pods to settle.
+        yield _emit(f"{label}Waiting for cluster to be healthy before rebooting {name}: {msg}", "warn")
+        deadline = time.monotonic() + 300
+        while not ok and time.monotonic() < deadline:
+            await asyncio.sleep(15)
+            ok, msg = await cluster.health(hid)
+    if not ok:
+        yield _emit(f"{label}Cluster not healthy before rebooting {name}: {msg}. Stopping, nothing was changed", "error")
+        yield False
+        return
+    try:
+        nodes = await cluster.nodes(hid)
+        me = nodes[node]
+    except Exception as e:
+        yield _emit(f"{label}Could not read node {node}: {e}. Stopping, nothing was changed", "error")
+        yield False
+        return
+    if me["etcd"]:
+        members = sum(1 for v in nodes.values() if v["etcd"])
+        if members == 2:
+            yield _emit(f"{label}{name} is 1 of only 2 etcd members; rebooting it loses quorum. Stopping", "error")
+            yield False
+            return
+        if members == 1:
+            yield _emit(f"{label}{name} is the only etcd member; the Kubernetes API will be down until it is back", "warn")
+    yield _emit(f"{label}Cluster healthy ({msg})", "ok")
+
+    boot_id = me["boot_id"]
+    yield _emit(f"  Draining {node}...", "info")
+    try:
+        await cluster.kubectl(
+            f"drain {shlex.quote(node)} --ignore-daemonsets --delete-emptydir-data "
+            f"--force --timeout=300s", hid, timeout=360)
+    except Exception as e:
+        yield _emit(f"  Drain failed: {e}", "error")
+        try:
+            await cluster.kubectl(f"uncordon {shlex.quote(node)}", hid)
+            yield _emit(f"  {node} uncordoned again, not rebooted. Stopping", "warn")
+        except Exception as e2:
+            yield _emit(f"  Could not uncordon {node} ({e2}); it is still cordoned. Stopping", "error")
+        yield False
+        return
+    yield _emit(f"  {node} drained", "ok")
+
+    finished = False
+    try:
+        recovered = False
+        async for item in _reboot_and_wait(host, defaults, ""):
+            if isinstance(item, bool):
+                recovered = item
+            else:
+                yield item
+        if not recovered:
+            yield _emit(f"  {node} left cordoned. Check it, then uncordon: kubectl uncordon {node}", "error")
+            finished = True  # don't auto-uncordon a node that never came back
+            yield False
+            return
+
+        yield _emit(f"  {name} is back on SSH, waiting for {node} to rejoin the cluster "
+                    f"(timeout {ready_timeout}s)...", "info")
+        deadline = time.monotonic() + ready_timeout
+        rejoined = False
+        last_msg = ""
+        while time.monotonic() < deadline:
+            await asyncio.sleep(15)
+            try:
+                n = (await cluster.nodes(hid)).get(node, {})
+            except Exception as e:
+                last_msg = str(e)
+                continue
+            if n.get("boot_id") == boot_id:
+                last_msg = "kubelet has not reported the new boot yet"
+                continue
+            if not n.get("ready"):
+                last_msg = f"{node} not Ready yet"
+                continue
+            try:
+                ok, last_msg = await cluster.node_pods_ready(node, hid)
+            except Exception as e:
+                ok, last_msg = False, str(e)
+            if not ok:
+                continue
+            ok, last_msg = await cluster.health(hid)
+            if ok:
+                rejoined = True
+                break
+        if not rejoined:
+            yield _emit(f"  {node} did not rejoin within {ready_timeout}s ({last_msg}). "
+                        f"Left cordoned; stopping. Uncordon when healthy: kubectl uncordon {node}", "error")
+            finished = True
+            yield False
+            return
+        yield _emit(f"  {node} rejoined: {last_msg}", "ok")
+
+        await cluster.kubectl(f"uncordon {shlex.quote(node)}", hid)
+        finished = True
+        yield _emit(f"  {node} uncordoned", "ok")
+    finally:
+        if not finished:
+            asyncio.create_task(_uncordon_when_ready(cluster, hid, node, boot_id))
+
+    yield _emit(f"  Waiting {grace}s for workloads to settle...", "info")
+    await asyncio.sleep(grace)
+    yield True
+
+
+async def _rolling_reboot_gen(hosts: list[dict], defaults: dict, grace: int = 30):
+    """Reboot hosts one at a time. k8s-tagged hosts go through drain/rejoin checks,
+    workers before control-plane nodes; everything else just waits for SSH."""
+    k8s = [h for h in hosts if _is_k8s_host(h)]
+    other = [h for h in hosts if not _is_k8s_host(h)]
+    cluster = None
+    if k8s:
+        cluster = _K8sCluster(_k8s_cluster_hosts(), defaults)
+        try:
+            await cluster.discover()
+        except Exception as e:
+            yield _emit(f"Kubernetes hosts in this run, but the cluster API is unreachable: {e}. "
+                        f"Not rebooting anything", "error")
+            yield "data: DONE\n\n"
+            return
+        k8s.sort(key=lambda h: (h["id"] in cluster.cp_ids, h["id"]))
+        yield _emit(f"Kubernetes-aware mode for {len(k8s)} node(s): workers first, then control-plane; "
+                    f"each is drained and must rejoin before the next", "info")
+    ordered = other + k8s
+    yield _emit(f"Rolling reboot: {len(ordered)} host(s)", "info")
+
+    for i, host in enumerate(ordered, 1):
+        label = f"[{i}/{len(ordered)}] "
+        ok = False
+        if cluster and _is_k8s_host(host):
+            async for item in _k8s_reboot_one(cluster, host, defaults, grace, label):
+                if isinstance(item, bool):
+                    ok = item
+                else:
+                    yield item
+        else:
+            async for item in _reboot_and_wait(host, defaults, label):
+                if isinstance(item, bool):
+                    ok = item
+                else:
+                    yield item
+            if ok:
+                yield _emit(f"  {host['name']} is back online, waiting {grace}s for services...", "ok")
+                await asyncio.sleep(grace)
+        if not ok:
+            yield "data: DONE\n\n"
+            return
+
+        yield _emit(f"  Rescanning {host['name']}...", "info")
+        try:
+            await scan_host_async(host["id"])
+            yield _emit(f"  {host['name']} ready", "ok")
+        except Exception as e:
+            yield _emit(f"  Rescan failed: {e}", "warn")
+
+    yield _emit("Rolling reboot complete", "done")
+    yield "data: DONE\n\n"
+
+
 @app.get("/api/rolling-reboot/{tag}")
-async def rolling_reboot_stream(tag: str, grace: int = 30):
-    """Reboot hosts in a group one at a time, waiting for each to recover before proceeding."""
-    ids = _hosts_for_tag(tag)
+async def rolling_reboot_stream(tag: str, grace: int = 30, ids: str = ""):
+    """Reboot hosts in a group one at a time, waiting for each to recover before proceeding.
+    `ids` (comma-separated) narrows the group to those hosts."""
+    host_ids = _hosts_for_tag(tag)
+    if ids:
+        wanted = {int(x) for x in ids.split(",") if x.strip().isdigit()}
+        host_ids = [h for h in host_ids if h in wanted]
 
     async def stream():
         db = get_db()
         hosts = [dict(db.execute("SELECT * FROM hosts WHERE id=?", (hid,)).fetchone())
-                 for hid in ids]
+                 for hid in host_ids]
         defaults = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings")}
         db.close()
-
-        def emit(msg: str, level: str = "info") -> str:
-            ts = datetime.now().strftime("%H:%M:%S")
-            return f"data: {level}|[{ts}] {msg}\n\n"
-
-        yield emit(f"Rolling reboot: {len(hosts)} host(s) in group", "info")
-
-        for i, host in enumerate(hosts, 1):
-            name = host["name"]
-            ip   = host["ip"]
-            host_sudo = _resolve_sudo_pass(host, defaults)
-            yield emit(f"[{i}/{len(hosts)}] Rebooting {name} ({ip})...", "info")
-
-            # Send reboot
-            try:
-                client = await ssh_connect_async(host, max_attempts=1)
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ssh_run(client, "reboot", timeout=5, sudo_pass=host_sudo)
-                )
-                client.close()
-            except Exception:
-                pass  # connection drop on reboot is expected
-
-            # Wait for SSH to go down (confirms reboot started)
-            yield emit(f"  Waiting for {name} to go offline...", "info")
-            deadline = asyncio.get_event_loop().time() + 120
-            while asyncio.get_event_loop().time() < deadline:
-                await asyncio.sleep(5)
-                try:
-                    r, w = await asyncio.wait_for(
-                        asyncio.open_connection(ip, int(host.get("port", 22))),
-                        timeout=3
-                    )
-                    w.close()
-                    await w.wait_closed()
-                except Exception:
-                    break  # connection refused/timeout = node is down
-
-            yield emit(f"  {name} is offline, waiting for recovery...", "warn")
-
-            # Wait for SSH to come back
-            deadline = asyncio.get_event_loop().time() + 300
-            recovered = False
-            while asyncio.get_event_loop().time() < deadline:
-                await asyncio.sleep(10)
-                try:
-                    r, w = await asyncio.wait_for(
-                        asyncio.open_connection(ip, int(host.get("port", 22))),
-                        timeout=5
-                    )
-                    w.close()
-                    await w.wait_closed()
-                    recovered = True
-                    break
-                except Exception:
-                    continue
-
-            if not recovered:
-                yield emit(f"  {name} did not recover within 5 minutes, stopping", "error")
-                yield "data: DONE\n\n"
-                return
-
-            # Grace period for services to stabilise
-            yield emit(f"  {name} is back online, waiting {grace}s for services...", "ok")
-            await asyncio.sleep(grace)
-
-            # Rescan to clear reboot_req flag
-            yield emit(f"  Rescanning {name}...", "info")
-            try:
-                await scan_host_async(host["id"])
-                yield emit(f"  {name} ready", "ok")
-            except Exception as e:
-                yield emit(f"  Rescan failed: {e}", "warn")
-
-        yield emit("Rolling reboot complete", "done")
-        yield "data: DONE\n\n"
+        async for chunk in _rolling_reboot_gen(hosts, defaults, grace):
+            yield chunk
 
     return StreamingResponse(
         stream(),
@@ -2738,6 +3079,10 @@ async def reboot_host_stream(host_id: int):
         if not row:
             yield "data: error|Host not found\n\ndata: DONE\n\n"
             return
+        if _is_k8s_host(row):
+            async for chunk in _rolling_reboot_gen([dict(row)], defaults):
+                yield chunk
+            return
 
         ip   = row["ip"]
         port = int(row["port"] or 22)
@@ -2810,6 +3155,8 @@ async def reboot_host(host_id: int):
     db.close()
     if not row:
         raise HTTPException(404, "Host not found")
+    if _is_k8s_host(row):
+        raise HTTPException(409, "Kubernetes node: use GET /api/hosts/{id}/reboot or a rolling reboot so it is drained first")
     sudo_pass = _resolve_sudo_pass(row, defaults)
     try:
         client = await ssh_connect_async(row, max_attempts=1)

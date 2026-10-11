@@ -186,7 +186,18 @@ patchkit.example.com {
 
 ## Rolling reboot
 
-Groups support a rolling reboot that reboots hosts one at a time. PatchKit waits for SSH to go down, waits for it to come back, holds a configurable grace period, then rescans to clear the reboot-required flag before moving to the next host. Useful for Kubernetes nodes where you need to maintain cluster quorum.
+Groups support a rolling reboot that reboots hosts one at a time. PatchKit waits for SSH to go down, waits for it to come back, holds a configurable grace period, then rescans to clear the reboot-required flag before moving to the next host.
+
+### Kubernetes nodes
+
+Hosts tagged `k8s` are treated as RKE2 cluster nodes, for rolling reboots, single-host reboots and "Reboot all". For each node PatchKit:
+
+1. Checks the cluster is healthy: all nodes Ready, every etcd member Ready, every DaemonSet/static pod Ready (CNI, kube-proxy, ingress, control-plane components), apiserver `/readyz` ok. It waits up to 5 minutes for that, and refuses to reboot an etcd member when doing so would lose quorum
+2. Cordons and drains the node (`--ignore-daemonsets --delete-emptydir-data --force`)
+3. Reboots it and waits until the kubelet reports a new boot ID, the node's own DaemonSet/static pods are Ready and the cluster is healthy again (`k8s_ready_timeout` setting, default 900s)
+4. Uncordons it and moves on
+
+Workers go first, control-plane nodes last. kubectl runs over SSH on a control-plane host other than the one rebooting, so the control-plane nodes must be in PatchKit with the same `k8s` tag, and the SSH user needs root or sudo. If a step fails the run stops and reports which node is left cordoned.
 
 ## Webhook notifications
 
